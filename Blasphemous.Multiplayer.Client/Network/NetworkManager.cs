@@ -661,6 +661,6 @@ namespace Blasphemous.Multiplayer.Client.Network
         public delegate void ConnectDelegate(bool success, RefusalType refusal);
         public event ConnectDelegate OnConnect;
 
-        private const byte PROTOCOL_VERSION = 9;
+        private const byte PROTOCOL_VERSION = 10;
     }
 }

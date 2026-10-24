@@ -2,6 +2,7 @@ using Blasphemous.ModdingAPI;
 using Blasphemous.Multiplayer.Client.Players;
 using Framework.FrameworkCore;
 using Framework.Managers;
+using Gameplay.GameControllers.Enemies.Framework.Attack;
 using Gameplay.GameControllers.Entities;
 using System;
 using System.Collections.Generic;
@@ -27,11 +28,13 @@ namespace Blasphemous.Multiplayer.Client.Enemies
         private readonly float _positionCutoff = 0.04f;
         private readonly float _lifeCutoff = 0.25f;
         private readonly float _scanInterval = 0.25f;
-        private readonly float _snapshotInterval = 0.5f;
-        private readonly float _retargetInterval = 0.15f;
+        private readonly float _snapshotInterval = 0.35f;
+        private readonly float _retargetInterval = 0.1f;
         private float _retargetTimer;
-        private readonly float _remoteHitCooldownSeconds = 0.45f;
+        private readonly float _remoteHitCooldownSeconds = 0.4f;
         private readonly float _aggroStickyBonus = 2.5f;
+        private readonly float _remoteContactRange = 1.75f;
+        private readonly float _remoteContactRangeAttacking = 2.4f;
         private readonly float[] _deferredScanAt = { 0.25f, 0.75f, 1.5f, 3.0f };
         private int _deferredScanIndex;
         private float _levelAge;
@@ -152,12 +155,13 @@ namespace Blasphemous.Multiplayer.Client.Enemies
             if (!_isSceneHost)
                 return;
 
-            // One shared AI: retarget host enemies toward nearest of local + remote players
+            // One shared AI: retarget + ensure remote players take contact/attack hits
             _retargetTimer -= Time.deltaTime;
             if (_retargetTimer <= 0f)
             {
                 _retargetTimer = _retargetInterval;
                 RetargetEnemiesToNearestPlayer();
+                PulseRemoteContactHits();
             }
 
             _snapshotTimer -= Time.deltaTime;
@@ -284,8 +288,52 @@ namespace Blasphemous.Multiplayer.Client.Enemies
                 if (best != null && synced.Enemy.Target != best)
                 {
                     synced.Enemy.Target = best;
+                    ModLog.Info($"[EnemySync] Retarget {synced.NetId} → {best.name}");
                 }
             }
+        }
+
+        /// <summary>
+        /// Belt-and-suspenders: when a shared enemy is on top of a remote avatar,
+        /// push contact damage even if a specific attack hardcoded Penitent.
+        /// </summary>
+        private void PulseRemoteContactHits()
+        {
+            foreach (var synced in UniqueEnemies())
+            {
+                if (!synced.IsValid || synced.Enemy.Dead || synced.IsPuppet)
+                    continue;
+
+                GameObject targetGo = synced.Enemy.Target;
+                if (targetGo == null)
+                    continue;
+
+                OtherPlayerScript other = targetGo.GetComponent<OtherPlayerScript>()
+                    ?? targetGo.GetComponentInParent<OtherPlayerScript>();
+                if (other == null || string.IsNullOrEmpty(other.PlayerName))
+                    continue;
+
+                float dist = Vector2.Distance(synced.Enemy.transform.position, targetGo.transform.position);
+                float range = synced.Enemy.IsAttacking ? _remoteContactRangeAttacking : _remoteContactRange;
+                if (dist > range)
+                    continue;
+
+                float amount = EstimateContactDamage(synced.Enemy);
+                NotifyRemotePlayerHitByEnemy(other.PlayerName, amount);
+            }
+        }
+
+        private static float EstimateContactDamage(Enemy enemy)
+        {
+            if (enemy == null)
+                return 10f;
+
+            EnemyAttack attack = enemy.GetComponentInChildren<EnemyAttack>();
+            if (attack != null && attack.ContactDamageAmount > 0f)
+                return attack.ContactDamageAmount;
+
+            // Fallback from typical early-game contact values
+            return Mathf.Max(8f, enemy.CurrentOutputDamage > 0 ? enemy.CurrentOutputDamage : 10f);
         }
 
         private List<GameObject> CollectPlayerTargets()
@@ -618,7 +666,7 @@ namespace Blasphemous.Multiplayer.Client.Enemies
         {
             if (_isSceneHost || _requestCooldown > 0f)
                 return;
-            _requestCooldown = 1.0f;
+            _requestCooldown = 0.4f;
             Main.Multiplayer.NetworkManager.SendEnemySyncRequest();
         }
 
@@ -788,6 +836,18 @@ namespace Blasphemous.Multiplayer.Client.Enemies
             {
                 SuppressUntrackedEnemyAi();
                 ApplyPendingDeaths();
+
+                // If local living enemies exist that still aren't bound to host ids, keep asking
+                int unbound = 0;
+                foreach (Enemy enemy in found)
+                {
+                    if (!IsSyncableEnemy(enemy) || enemy.Dead)
+                        continue;
+                    if (!GetTrackedNetId(enemy).HasValue)
+                        unbound++;
+                }
+                if (unbound > 0)
+                    RequestSyncFromHost();
             }
 
             if (forceSnapshot && _isSceneHost)
@@ -833,14 +893,37 @@ namespace Blasphemous.Multiplayer.Client.Enemies
             // Prefer stable-id match (works even when host pos has drifted far from friend's spawn)
             Enemy found = FindEnemyByStableId(netId);
             if (found == null)
-                found = FindNearestUntrackedEnemy(position, 18f, enemyTypeId, allowDead: true);
+                found = FindNearestUntrackedEnemy(position, 24f, enemyTypeId, allowDead: true);
             if (found == null && !string.IsNullOrEmpty(enemyTypeId))
-                found = FindNearestUntrackedEnemy(position, 28f, enemyTypeId, allowDead: true);
+                found = FindNearestUntrackedEnemy(position, 40f, enemyTypeId, allowDead: true);
+            // Last resort: exactly one unbound enemy of that type in the room
+            if (found == null && !string.IsNullOrEmpty(enemyTypeId))
+                found = FindSoleUntrackedOfType(enemyTypeId);
 
             if (found == null)
                 return null;
 
+            ModLog.Info($"[EnemySync] Bind {netId}/{enemyTypeId} → local {found.Id} @{found.transform.position}");
             return RegisterEnemy(found, netId);
+        }
+
+        private Enemy FindSoleUntrackedOfType(string enemyTypeId)
+        {
+            Enemy sole = null;
+            Enemy[] found = UnityEngine.Object.FindObjectsOfType<Enemy>();
+            foreach (Enemy enemy in found)
+            {
+                if (!IsSyncableEnemy(enemy) || enemy.Dead)
+                    continue;
+                if (enemy.Id != enemyTypeId)
+                    continue;
+                if (GetTrackedNetId(enemy).HasValue)
+                    continue;
+                if (sole != null)
+                    return null; // ambiguous
+                sole = enemy;
+            }
+            return sole;
         }
 
         private Enemy FindEnemyByStableId(int netId)

@@ -20,7 +20,9 @@ namespace Blasphemous.Multiplayer.Client.Players
 
         public OtherPlayerAttackScript OtherPlayerAttack { get; private set; }
 
-        public bool IsFacingRight => !CharacterRenderer.flipX;
+        public string PlayerName => playerStatus?.Name ?? string.Empty;
+
+        public bool IsFacingRight => CharacterRenderer != null && !CharacterRenderer.flipX;
 
         // Adds necessary components & initializes them
         public void SetupPlayer(PlayerStatus status)
@@ -65,13 +67,13 @@ namespace Blasphemous.Multiplayer.Client.Players
                 rb.gravityScale = 0f;
             }
 
-            if (GetComponent<BoxCollider2D>() == null)
-            {
-                var hurt = gameObject.AddComponent<BoxCollider2D>();
-                hurt.isTrigger = true;
-                hurt.offset = new Vector2(0f, 0.92f);
-                hurt.size = new Vector2(0.665f, 1.866f);
-            }
+            BoxCollider2D hurt = GetComponent<BoxCollider2D>();
+            if (hurt == null)
+                hurt = gameObject.AddComponent<BoxCollider2D>();
+            hurt.isTrigger = true;
+            // Slightly larger than Penitent sword hitbox so contact/vision overlap reliably
+            hurt.offset = new Vector2(0f, 0.95f);
+            hurt.size = new Vector2(0.85f, 2.0f);
         }
 
         public Vector2 CurrentPosition

@@ -1,6 +1,11 @@
+using Blasphemous.Multiplayer.Client.Players;
+using Framework.Managers;
+using Gameplay.GameControllers.Enemies.Framework.Attack;
 using Gameplay.GameControllers.Entities;
+using Gameplay.GameControllers.Penitent;
 using HarmonyLib;
 using Tools.Level.Layout;
+using UnityEngine;
 
 namespace Blasphemous.Multiplayer.Client.Enemies
 {
@@ -28,6 +33,54 @@ namespace Blasphemous.Multiplayer.Client.Enemies
             if (enemy == null)
                 enemy = __instance.GetComponentInParent<Enemy>();
             return !EnemyDamageHooks.ShouldBlockLocalDamage(enemy, amount);
+        }
+    }
+
+    /// <summary>
+    /// Many enemy attacks call ContactAttack(Core.Logic.Penitent) even when the AI Target
+    /// is a remote co-op avatar. Redirect the hit onto that avatar so one shared enemy
+    /// can damage either player.
+    /// </summary>
+    [HarmonyPatch(typeof(EnemyAttack), nameof(EnemyAttack.ContactAttack))]
+    class Enemy_ContactAttack_Redirect_Patch
+    {
+        public static void Prefix(EnemyAttack __instance, ref IDamageable damageable)
+        {
+            if (!Main.Multiplayer.NetworkManager.IsConnected)
+                return;
+            if (Main.Multiplayer.EnemyManager == null || !Main.Multiplayer.EnemyManager.IsSceneHost)
+                return;
+
+            Enemy enemy = __instance != null
+                ? __instance.GetComponentInParent<Enemy>()
+                : null;
+            if (enemy == null || !EnemyManager.IsSyncableEnemy(enemy) || enemy.Dead)
+                return;
+
+            OtherPlayerScript remote = ResolveRemoteTarget(enemy);
+            if (remote == null)
+                return;
+
+            // Only redirect when the game was about to hit the local Penitent (or null)
+            if (damageable == null || IsLocalPenitent(damageable))
+                damageable = remote;
+        }
+
+        private static OtherPlayerScript ResolveRemoteTarget(Enemy enemy)
+        {
+            if (enemy.Target == null)
+                return null;
+            return enemy.Target.GetComponent<OtherPlayerScript>()
+                ?? enemy.Target.GetComponentInParent<OtherPlayerScript>();
+        }
+
+        private static bool IsLocalPenitent(IDamageable damageable)
+        {
+            if (damageable is Penitent)
+                return true;
+            if (damageable is Component c)
+                return c.GetComponentInParent<Penitent>() != null;
+            return false;
         }
     }
 
