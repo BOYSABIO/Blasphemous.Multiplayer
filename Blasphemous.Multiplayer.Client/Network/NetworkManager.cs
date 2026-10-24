@@ -545,16 +545,37 @@ namespace Blasphemous.Multiplayer.Client.Network
             Main.Multiplayer.EnemyManager.ReceiveDamage(netId, amount, attackerName, hitPos, enemyTypeId);
         }
 
-        public void SendEnemyDeath(int netId)
+        public void SendEnemyDeath(int netId, Vector2 deathPos, string enemyTypeId)
         {
-            QueueMesssage(BitConverter.GetBytes(netId), NetworkType.EnemyDeath);
+            List<byte> bytes = new();
+            bytes.AddRange(BitConverter.GetBytes(netId));
+            bytes.AddRange(BitConverter.GetBytes(deathPos.x));
+            bytes.AddRange(BitConverter.GetBytes(deathPos.y));
+            byte[] typeBytes = Encoding.UTF8.GetBytes(enemyTypeId ?? string.Empty);
+            bytes.Add((byte)typeBytes.Length);
+            bytes.AddRange(typeBytes);
+            QueueMesssage(bytes.ToArray(), NetworkType.EnemyDeath);
         }
 
         private void ReceiveEnemyDeath(byte[] data)
         {
             int startIdx = ExtractNameFromData(data, out string sender);
             int netId = BitConverter.ToInt32(data, startIdx);
-            Main.Multiplayer.EnemyManager.ReceiveDeath(sender, netId);
+            Vector2 deathPos = Vector2.zero;
+            string enemyTypeId = string.Empty;
+            if (data.Length >= startIdx + 12)
+            {
+                deathPos = new Vector2(
+                    BitConverter.ToSingle(data, startIdx + 4),
+                    BitConverter.ToSingle(data, startIdx + 8));
+            }
+            if (data.Length > startIdx + 12)
+            {
+                byte typeLen = data[startIdx + 12];
+                if (typeLen > 0 && startIdx + 13 + typeLen <= data.Length)
+                    enemyTypeId = Encoding.UTF8.GetString(data, startIdx + 13, typeLen);
+            }
+            Main.Multiplayer.EnemyManager.ReceiveDeath(sender, netId, deathPos, enemyTypeId);
         }
 
         public void SendEnemySyncRequest()
@@ -611,6 +632,6 @@ namespace Blasphemous.Multiplayer.Client.Network
         public delegate void ConnectDelegate(bool success, RefusalType refusal);
         public event ConnectDelegate OnConnect;
 
-        private const byte PROTOCOL_VERSION = 7;
+        private const byte PROTOCOL_VERSION = 8;
     }
 }

@@ -744,5 +744,5 @@ public class Server
         return bytes.ToArray();
     }
 
-    private const byte PROTOCOL_VERSION = 7;
+    private const byte PROTOCOL_VERSION = 8;
 }
