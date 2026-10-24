@@ -320,8 +320,8 @@ namespace Blasphemous.Multiplayer.Client.Enemies
                 sent++;
             }
 
-            _snapshotLogDivider++;
-            if (sent > 0 && _snapshotLogDivider % 4 == 1)
+            _snapshotLogCounter++;
+            if (sent > 0 && _snapshotLogCounter % 4 == 1)
                 ModLog.Info($"[EnemySync] Snapshots x{sent} (host={_sceneHostName})");
         }
 
@@ -616,7 +616,7 @@ namespace Blasphemous.Multiplayer.Client.Enemies
             _scanTimer = 0f;
             _snapshotTimer = 0f;
             _requestCooldown = 0f;
-            _snapshotLogDivider = 0;
+            _snapshotLogCounter = 0;
             _levelAge = 0f;
             _deferredScanIndex = 0;
         }
