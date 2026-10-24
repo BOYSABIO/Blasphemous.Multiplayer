@@ -194,14 +194,19 @@ namespace Blasphemous.Multiplayer.Client.Enemies
                 float life = synced.Enemy.CurrentLife;
                 bool facingRight = IsFacingRight(synced.Enemy);
                 int animHash = synced.ReadAnimHash();
+                float animTime = synced.ReadAnimTime();
+                bool attacking = synced.Enemy.IsAttacking;
 
                 bool moved = Mathf.Abs(pos.x - synced.LastSentPosition.x) > _positionCutoff
                     || Mathf.Abs(pos.y - synced.LastSentPosition.y) > _positionCutoff;
                 bool lifeChanged = Mathf.Abs(life - synced.LastSentLife) > _lifeCutoff;
                 bool facingChanged = facingRight != synced.LastSentFacingRight;
                 bool animChanged = animHash != 0 && animHash != synced.LastSentAnimHash;
+                // While attacking, also push when swing progress drifts so puppets animate
+                bool animTimeChanged = attacking
+                    && Mathf.Abs((animTime % 1f) - (synced.LastSentAnimTime % 1f)) > 0.08f;
 
-                if (!moved && !lifeChanged && !facingChanged && !animChanged)
+                if (!moved && !lifeChanged && !facingChanged && !animChanged && !animTimeChanged)
                     continue;
 
                 synced.LastSentPosition = pos;
@@ -209,7 +214,9 @@ namespace Blasphemous.Multiplayer.Client.Enemies
                 synced.LastSentAlive = true;
                 synced.LastSentFacingRight = facingRight;
                 synced.LastSentAnimHash = animHash;
-                Main.Multiplayer.NetworkManager.SendEnemyState(synced.NetId, pos, life, alive: true, facingRight, animHash);
+                synced.LastSentAnimTime = animTime;
+                Main.Multiplayer.NetworkManager.SendEnemyState(
+                    synced.NetId, pos, life, alive: true, facingRight, animHash, animTime);
             }
         }
 
@@ -411,7 +418,7 @@ namespace Blasphemous.Multiplayer.Client.Enemies
             return true;
         }
 
-        public void ReceiveSnapshot(string senderName, int netId, string enemyTypeId, Vector2 position, float life, bool alive, bool facingRight, int animHash)
+        public void ReceiveSnapshot(string senderName, int netId, string enemyTypeId, Vector2 position, float life, bool alive, bool facingRight, int animHash, float animTime)
         {
             // Sticky host: ignore peer authority traffic; do not yield mid-room
             if (_isSceneHost)
@@ -420,7 +427,7 @@ namespace Blasphemous.Multiplayer.Client.Enemies
             SyncedEnemy synced = BindRemoteEnemy(netId, enemyTypeId, position);
             if (synced == null)
             {
-                if (!alive)
+                if (!alive || life <= 0.01f)
                 {
                     _pendingDeaths[netId] = new PendingDeath { TypeId = enemyTypeId ?? string.Empty, Position = position };
                     ModLog.Warn($"[EnemySync] Snapshot death pending {netId}/{enemyTypeId}");
@@ -433,12 +440,12 @@ namespace Blasphemous.Multiplayer.Client.Enemies
                 return;
             }
 
-            ApplyRemoteState(synced, position, life, alive, facingRight, animHash);
-            if (!alive)
+            ApplyRemoteState(synced, position, life, alive, facingRight, animHash, animTime);
+            if (!alive || life <= 0.01f)
                 _pendingDeaths.Remove(netId);
         }
 
-        public void ReceiveState(string senderName, int netId, Vector2 position, float life, bool alive, bool facingRight, int animHash)
+        public void ReceiveState(string senderName, int netId, Vector2 position, float life, bool alive, bool facingRight, int animHash, float animTime)
         {
             if (_isSceneHost)
                 return;
@@ -447,7 +454,7 @@ namespace Blasphemous.Multiplayer.Client.Enemies
             if (synced == null)
                 return;
 
-            ApplyRemoteState(synced, position, life, alive, facingRight, animHash);
+            ApplyRemoteState(synced, position, life, alive, facingRight, animHash, animTime);
         }
 
         public void ReceiveDamage(int netId, float amount, string attackerName, Vector2 hitPos, string enemyTypeId)
@@ -525,16 +532,18 @@ namespace Blasphemous.Multiplayer.Client.Enemies
                 return;
 
             _applyingRemoteDamage = true;
+            bool newlyApplied;
             try
             {
-                synced.ForceVisualDeath();
+                newlyApplied = synced.ForceVisualDeath();
             }
             finally
             {
                 _applyingRemoteDamage = false;
             }
 
-            ModLog.Info($"[EnemySync] Applied death {synced.NetId} ({synced.EnemyTypeId}) visual={synced.VisuallyDead}");
+            if (newlyApplied)
+                ModLog.Info($"[EnemySync] Applied death {synced.NetId} ({synced.EnemyTypeId})");
         }
 
         private void ApplyPendingDeaths()
@@ -581,7 +590,7 @@ namespace Blasphemous.Multiplayer.Client.Enemies
                 if (!synced.IsValid)
                     continue;
 
-                bool alive = !synced.Enemy.Dead;
+                bool alive = !synced.Enemy.Dead && !synced.VisuallyDead;
                 Vector2 pos = alive
                     ? (Vector2)synced.Enemy.transform.position
                     : (synced.LastSentPosition.sqrMagnitude > 0.0001f
@@ -590,13 +599,15 @@ namespace Blasphemous.Multiplayer.Client.Enemies
                 float life = alive ? synced.Enemy.CurrentLife : 0f;
                 bool facingRight = IsFacingRight(synced.Enemy);
                 int animHash = alive ? synced.ReadAnimHash() : 0;
+                float animTime = alive ? synced.ReadAnimTime() : 0f;
                 synced.LastSentPosition = pos;
                 synced.LastSentLife = life;
                 synced.LastSentAlive = alive;
                 synced.LastSentFacingRight = facingRight;
                 synced.LastSentAnimHash = animHash;
+                synced.LastSentAnimTime = animTime;
                 Main.Multiplayer.NetworkManager.SendEnemySnapshot(
-                    synced.NetId, synced.EnemyTypeId, pos, life, alive, facingRight, animHash);
+                    synced.NetId, synced.EnemyTypeId, pos, life, alive, facingRight, animHash, animTime);
                 sent++;
                 if (!alive)
                     deadSent++;
@@ -678,7 +689,8 @@ namespace Blasphemous.Multiplayer.Client.Enemies
             if (!alive)
                 Main.Multiplayer.NetworkManager.SendEnemyDeath(synced.NetId, pos, synced.EnemyTypeId);
             else
-                Main.Multiplayer.NetworkManager.SendEnemyState(synced.NetId, pos, life, true, facingRight, synced.ReadAnimHash());
+                Main.Multiplayer.NetworkManager.SendEnemyState(
+                    synced.NetId, pos, life, true, facingRight, synced.ReadAnimHash(), synced.ReadAnimTime());
         }
 
         /// <summary>
@@ -1005,13 +1017,17 @@ namespace Blasphemous.Multiplayer.Client.Enemies
             return best;
         }
 
-        private void ApplyRemoteState(SyncedEnemy synced, Vector2 position, float life, bool alive, bool facingRight, int animHash)
+        private void ApplyRemoteState(SyncedEnemy synced, Vector2 position, float life, bool alive, bool facingRight, int animHash, float animTime)
         {
             if (!synced.IsValid)
                 return;
 
+            // Already hard-killed — ignore further living/dead spam from host snapshots
+            if (synced.VisuallyDead)
+                return;
+
             // life<=0 must count as dead even if the alive flag is wrong
-            bool shouldBeDead = !alive || life <= 0.01f || synced.VisuallyDead;
+            bool shouldBeDead = !alive || life <= 0.01f;
             if (shouldBeDead)
             {
                 ForceKill(synced);
@@ -1032,13 +1048,14 @@ namespace Blasphemous.Multiplayer.Client.Enemies
             if (Mathf.Abs(synced.Enemy.CurrentLife - life) > 0.1f)
                 synced.Enemy.CurrentLife = life;
 
-            synced.ApplyAnimHash(animHash);
+            synced.ApplyAnim(animHash, animTime);
 
             synced.LastSentPosition = position;
             synced.LastSentLife = life;
             synced.LastSentAlive = true;
             synced.LastSentFacingRight = facingRight;
             synced.LastSentAnimHash = animHash;
+            synced.LastSentAnimTime = animTime;
         }
 
         private Enemy FindEnemyByNetId(int netId, string enemyTypeId, Vector2 hintPos)

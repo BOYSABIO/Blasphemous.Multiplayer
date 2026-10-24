@@ -6,7 +6,7 @@ namespace Blasphemous.Multiplayer.Client.Enemies
 {
     /// <summary>
     /// Tracks one room enemy under host authority (or as a remote-driven puppet).
-    /// One logical enemy across clients — host runs AI, non-hosts mirror state.
+    /// One logical enemy across clients — host runs AI, non-hosts mirror state + anims.
     /// </summary>
     public class SyncedEnemy
     {
@@ -19,6 +19,7 @@ namespace Blasphemous.Multiplayer.Client.Enemies
         public bool LastSentAlive { get; set; }
         public bool LastSentFacingRight { get; set; }
         public int LastSentAnimHash { get; set; }
+        public float LastSentAnimTime { get; set; }
 
         public bool IsPuppet { get; private set; }
         public bool VisuallyDead { get; private set; }
@@ -42,6 +43,7 @@ namespace Blasphemous.Multiplayer.Client.Enemies
             LastSentAlive = !enemy.Dead;
             LastSentFacingRight = enemy.Status == null || enemy.Status.Orientation == EntityOrientation.Right;
             LastSentAnimHash = ReadAnimHash();
+            LastSentAnimTime = ReadAnimTime();
         }
 
         public int ReadAnimHash()
@@ -51,20 +53,50 @@ namespace Blasphemous.Multiplayer.Client.Enemies
             return Enemy.Animator.GetCurrentAnimatorStateInfo(0).shortNameHash;
         }
 
-        public void ApplyAnimHash(int animHash)
+        public float ReadAnimTime()
+        {
+            if (Enemy == null || Enemy.Animator == null)
+                return 0f;
+            return Enemy.Animator.GetCurrentAnimatorStateInfo(0).normalizedTime;
+        }
+
+        /// <summary>
+        /// Mirror host animator state. Restarts only when the clip changes;
+        /// otherwise seeks normalized time so attack windups look continuous.
+        /// </summary>
+        public void ApplyAnim(int animHash, float normalizedTime)
         {
             if (VisuallyDead || LastSentAlive == false)
                 return;
             if (animHash == 0 || Enemy == null || Enemy.Animator == null)
                 return;
-            if (Enemy.Animator.GetCurrentAnimatorStateInfo(0).shortNameHash == animHash)
-                return;
-            Enemy.Animator.Play(animHash, 0, 0f);
+
+            Animator animator = Enemy.Animator;
+            AnimatorStateInfo current = animator.GetCurrentAnimatorStateInfo(0);
+
+            if (current.shortNameHash != animHash)
+            {
+                animator.Play(animHash, 0, Mathf.Clamp01(normalizedTime % 1f));
+                animator.Update(0f);
+            }
+            else
+            {
+                // Same clip — keep playback in sync without restarting the swing
+                float local = current.normalizedTime % 1f;
+                float remote = normalizedTime % 1f;
+                if (Mathf.Abs(local - remote) > 0.12f)
+                {
+                    animator.Play(animHash, 0, remote);
+                    animator.Update(0f);
+                }
+            }
+
+            LastSentAnimHash = animHash;
+            LastSentAnimTime = normalizedTime;
         }
 
         public void SetPuppet(bool puppet)
         {
-            // Dead enemies must never regain AI
             if (VisuallyDead || (Enemy != null && Enemy.Dead) || LastSentAlive == false)
             {
                 IsPuppet = true;
@@ -84,12 +116,21 @@ namespace Blasphemous.Multiplayer.Client.Enemies
         }
 
         /// <summary>
-        /// Hard death for sync: kill pipeline + strip combat + hide body so both clients agree.
+        /// Hard death for sync. Idempotent — safe to call repeatedly from dead snapshots.
         /// </summary>
-        public void ForceVisualDeath()
+        /// <returns>True if this call newly applied death visuals.</returns>
+        public bool ForceVisualDeath()
         {
             if (Enemy == null)
-                return;
+                return false;
+
+            if (VisuallyDead)
+            {
+                // Already handled — keep body gone if something re-enabled it
+                if (Enemy.gameObject != null && Enemy.gameObject.activeSelf)
+                    Enemy.gameObject.SetActive(false);
+                return false;
+            }
 
             VisuallyDead = true;
             LastSentAlive = false;
@@ -116,6 +157,7 @@ namespace Blasphemous.Multiplayer.Client.Enemies
             }
 
             DisableCombatAndVisuals(hideSprite: true);
+            return true;
         }
 
         private void ApplyPuppetState(bool puppet)
@@ -139,6 +181,10 @@ namespace Blasphemous.Multiplayer.Client.Enemies
                 }
             }
 
+            // Keep animator running on living puppets so attack clips can play
+            if (Enemy.Animator != null && !VisuallyDead)
+                Enemy.Animator.enabled = true;
+
             if (puppet || VisuallyDead)
                 DisableCombatColliders();
         }
@@ -150,10 +196,12 @@ namespace Blasphemous.Multiplayer.Client.Enemies
             if (!hideSprite || Enemy == null)
                 return;
 
+            if (Enemy.Animator != null)
+                Enemy.Animator.enabled = false;
+
             if (Enemy.SpriteRenderer != null)
                 Enemy.SpriteRenderer.enabled = false;
 
-            // Also hide any child sprite renderers (shadows / extra limbs)
             var renderers = Enemy.GetComponentsInChildren<SpriteRenderer>(true);
             for (int i = 0; i < renderers.Length; i++)
                 renderers[i].enabled = false;

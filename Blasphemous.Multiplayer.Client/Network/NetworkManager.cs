@@ -486,28 +486,28 @@ namespace Blasphemous.Multiplayer.Client.Network
 
         // Enemy sync — payloads are name-prefixed by the server (same as Position/Attack)
 
-        public void SendEnemySnapshot(int netId, string enemyTypeId, Vector2 position, float life, bool alive, bool facingRight, int animHash)
+        public void SendEnemySnapshot(int netId, string enemyTypeId, Vector2 position, float life, bool alive, bool facingRight, int animHash, float animTime)
         {
-            QueueMesssage(BuildEnemyBody(netId, enemyTypeId, position, life, alive, facingRight, animHash, includeTypeId: true), NetworkType.EnemySnapshot);
+            QueueMesssage(BuildEnemyBody(netId, enemyTypeId, position, life, alive, facingRight, animHash, animTime, includeTypeId: true), NetworkType.EnemySnapshot);
         }
 
         private void ReceiveEnemySnapshot(byte[] data)
         {
             int idx = ExtractNameFromData(data, out string sender);
-            ReadEnemyBody(data, idx, includeTypeId: true, out int netId, out string enemyTypeId, out Vector2 position, out float life, out bool alive, out bool facingRight, out int animHash);
-            Main.Multiplayer.EnemyManager.ReceiveSnapshot(sender, netId, enemyTypeId, position, life, alive, facingRight, animHash);
+            ReadEnemyBody(data, idx, includeTypeId: true, out int netId, out string enemyTypeId, out Vector2 position, out float life, out bool alive, out bool facingRight, out int animHash, out float animTime);
+            Main.Multiplayer.EnemyManager.ReceiveSnapshot(sender, netId, enemyTypeId, position, life, alive, facingRight, animHash, animTime);
         }
 
-        public void SendEnemyState(int netId, Vector2 position, float life, bool alive, bool facingRight, int animHash)
+        public void SendEnemyState(int netId, Vector2 position, float life, bool alive, bool facingRight, int animHash, float animTime)
         {
-            QueueMesssage(BuildEnemyBody(netId, null, position, life, alive, facingRight, animHash, includeTypeId: false), NetworkType.EnemyState);
+            QueueMesssage(BuildEnemyBody(netId, null, position, life, alive, facingRight, animHash, animTime, includeTypeId: false), NetworkType.EnemyState);
         }
 
         private void ReceiveEnemyState(byte[] data)
         {
             int idx = ExtractNameFromData(data, out string sender);
-            ReadEnemyBody(data, idx, includeTypeId: false, out int netId, out _, out Vector2 position, out float life, out bool alive, out bool facingRight, out int animHash);
-            Main.Multiplayer.EnemyManager.ReceiveState(sender, netId, position, life, alive, facingRight, animHash);
+            ReadEnemyBody(data, idx, includeTypeId: false, out int netId, out _, out Vector2 position, out float life, out bool alive, out bool facingRight, out int animHash, out float animTime);
+            Main.Multiplayer.EnemyManager.ReceiveState(sender, netId, position, life, alive, facingRight, animHash, animTime);
         }
 
         public void SendEnemyDamage(int netId, float amount, Vector2 hitPos, string enemyTypeId)
@@ -609,7 +609,7 @@ namespace Blasphemous.Multiplayer.Client.Network
             Main.Multiplayer.EnemyManager.ReceiveEnemyPlayerHit(sender, receiver, amount);
         }
 
-        private static byte[] BuildEnemyBody(int netId, string enemyTypeId, Vector2 position, float life, bool alive, bool facingRight, int animHash, bool includeTypeId)
+        private static byte[] BuildEnemyBody(int netId, string enemyTypeId, Vector2 position, float life, bool alive, bool facingRight, int animHash, float animTime, bool includeTypeId)
         {
             EnemySyncFlags flags = EnemySyncFlags.None;
             if (alive) flags |= EnemySyncFlags.Alive;
@@ -622,6 +622,7 @@ namespace Blasphemous.Multiplayer.Client.Network
             bytes.AddRange(BitConverter.GetBytes(position.y));
             bytes.AddRange(BitConverter.GetBytes(life));
             bytes.AddRange(BitConverter.GetBytes(animHash));
+            bytes.AddRange(BitConverter.GetBytes(animTime));
 
             if (includeTypeId)
             {
@@ -633,7 +634,7 @@ namespace Blasphemous.Multiplayer.Client.Network
             return bytes.ToArray();
         }
 
-        private static void ReadEnemyBody(byte[] data, int idx, bool includeTypeId, out int netId, out string enemyTypeId, out Vector2 position, out float life, out bool alive, out bool facingRight, out int animHash)
+        private static void ReadEnemyBody(byte[] data, int idx, bool includeTypeId, out int netId, out string enemyTypeId, out Vector2 position, out float life, out bool alive, out bool facingRight, out int animHash, out float animTime)
         {
             netId = BitConverter.ToInt32(data, idx);
             EnemySyncFlags flags = (EnemySyncFlags)data[idx + 4];
@@ -642,17 +643,22 @@ namespace Blasphemous.Multiplayer.Client.Network
             position = new Vector2(BitConverter.ToSingle(data, idx + 5), BitConverter.ToSingle(data, idx + 9));
             life = BitConverter.ToSingle(data, idx + 13);
             animHash = 0;
+            animTime = 0f;
             // Protocol 9+: anim hash after life
             if (data.Length >= idx + 21)
                 animHash = BitConverter.ToInt32(data, idx + 17);
+            // Protocol 11+: normalized anim time after hash
+            if (data.Length >= idx + 25)
+                animTime = BitConverter.ToSingle(data, idx + 21);
             enemyTypeId = string.Empty;
             if (includeTypeId)
             {
-                int typeAt = idx + 21;
+                int typeAt = data.Length >= idx + 25 ? idx + 25 : idx + 21;
                 if (data.Length > typeAt)
                 {
                     byte typeLen = data[typeAt];
-                    enemyTypeId = Encoding.UTF8.GetString(data, typeAt + 1, typeLen);
+                    if (typeLen > 0 && typeAt + 1 + typeLen <= data.Length)
+                        enemyTypeId = Encoding.UTF8.GetString(data, typeAt + 1, typeLen);
                 }
             }
         }
@@ -661,6 +667,6 @@ namespace Blasphemous.Multiplayer.Client.Network
         public delegate void ConnectDelegate(bool success, RefusalType refusal);
         public event ConnectDelegate OnConnect;
 
-        private const byte PROTOCOL_VERSION = 10;
+        private const byte PROTOCOL_VERSION = 11;
     }
 }
