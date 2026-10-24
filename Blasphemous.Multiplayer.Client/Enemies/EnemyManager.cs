@@ -694,49 +694,67 @@ namespace Blasphemous.Multiplayer.Client.Enemies
         }
 
         /// <summary>
-        /// Sticky scene host: first occupant claims; joiners always follow while anyone else is present.
-        /// Host is never stolen mid-room by peer enemy packets.
+        /// Preferred host (server operator / first connected) owns enemy AI whenever they are in the room.
+        /// Otherwise sticky first-arriver. Never yield mid-room to peer snapshot spam.
         /// </summary>
         private void ClaimOrFollowExistingHost()
         {
-            string local = Main.Multiplayer.PlayerName ?? string.Empty;
-            var present = GetPlayersInScene();
-            bool othersPresent = present.Any(p => p != local);
-
-            if (othersPresent)
-            {
-                // Joiner: never claim. Prefer lex-first other as the expected sticky host name
-                // until roster recalc confirms (existing host keeps themselves via Recalculate).
-                string other = present.Where(p => p != local).OrderBy(p => p, StringComparer.Ordinal).First();
-                _sceneHostName = other;
-                _isSceneHost = false;
-                ModLog.Info($"[EnemySync] Joiner following host={_sceneHostName}");
-            }
-            else
-            {
-                _sceneHostName = local;
-                _isSceneHost = true;
-                ModLog.Info($"[EnemySync] Claiming sticky host ({local})");
-            }
+            ApplyHostResolution(reason: "level-load");
         }
 
         private void RecalculateHostAfterRosterChange()
         {
+            ApplyHostResolution(reason: "roster");
+        }
+
+        private void ApplyHostResolution(string reason)
+        {
             string local = Main.Multiplayer.PlayerName ?? string.Empty;
             var present = GetPlayersInScene();
+            string previous = _sceneHostName;
+            string resolved = ResolveSceneHostName(present, local);
 
-            // Sticky: keep current host for as long as they remain in the scene
-            if (!string.IsNullOrEmpty(_sceneHostName) && present.Contains(_sceneHostName))
+            _sceneHostName = resolved;
+            _isSceneHost = !string.IsNullOrEmpty(resolved) && resolved == local;
+
+            if (previous != _sceneHostName || reason == "level-load")
             {
-                _isSceneHost = _sceneHostName == local;
-                return;
+                ModLog.Info(
+                    $"[EnemySync] Host resolve ({reason}): {_sceneHostName} localHost={_isSceneHost} preferred={GetPreferredEnemyHostName()}");
+            }
+        }
+
+        private string ResolveSceneHostName(List<string> present, string local)
+        {
+            if (present == null || present.Count == 0)
+                return local;
+
+            string preferred = GetPreferredEnemyHostName();
+            if (!string.IsNullOrEmpty(preferred) && present.Contains(preferred))
+                return preferred;
+
+            // Preferred absent: keep sticky current host if still here
+            if (!string.IsNullOrEmpty(_sceneHostName) && present.Contains(_sceneHostName))
+                return _sceneHostName;
+
+            // Alone or re-elect among remaining
+            if (present.Count == 1)
+                return present[0];
+
+            return present.OrderBy(p => p, StringComparer.Ordinal).First();
+        }
+
+        private string GetPreferredEnemyHostName()
+        {
+            string fromConfig = Main.Multiplayer.config?.preferredEnemyHost;
+            if (!string.IsNullOrEmpty(fromConfig))
+            {
+                string trimmed = fromConfig.Trim();
+                if (trimmed.Length > 0)
+                    return trimmed;
             }
 
-            // Host left — re-elect once among remaining players
-            string previous = _sceneHostName;
-            _sceneHostName = present.OrderBy(p => p, StringComparer.Ordinal).FirstOrDefault() ?? local;
-            _isSceneHost = _sceneHostName == local;
-            ModLog.Info($"[EnemySync] Host left ({previous}) → re-elect {_sceneHostName} (localHost={_isSceneHost})");
+            return Main.Multiplayer.NetworkManager.SessionEnemyHostName ?? string.Empty;
         }
 
         private List<string> GetPlayersInScene()

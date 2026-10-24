@@ -3,6 +3,7 @@ using Blasphemous.Multiplayer.Server.Models;
 using SimpleTCP;
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Text;
 
 namespace Blasphemous.Multiplayer.Server;
@@ -14,6 +15,8 @@ public class Server
 
     private SimpleTcpServer server;
     private Dictionary<string, PlayerInfo> connectedPlayers;
+    /// <summary>Preferred enemy-AI host — first accepted connection (server operator if they join first).</summary>
+    private string _sessionEnemyHostName = string.Empty;
 
     public Server(int maxPlayers, string password)
     {
@@ -54,6 +57,7 @@ public class Server
         }
 
         connectedPlayers = new Dictionary<string, PlayerInfo>();
+        _sessionEnemyHostName = string.Empty;
         return true;
     }
 
@@ -116,6 +120,7 @@ public class Server
                 case NetworkType.EnemyDeath:    ReceiveEnemyRelay(e.ip, data, NetworkType.EnemyDeath); break;
                 case NetworkType.EnemySyncRequest: ReceiveEnemyRelay(e.ip, data, NetworkType.EnemySyncRequest); break;
                 case NetworkType.EnemyPlayerHit: ReceiveEnemyRelay(e.ip, data, NetworkType.EnemyPlayerHit); break;
+                case NetworkType.SessionEnemyHost: break; // server → clients only
                 default:
                     Logger.Error($"Data type '{type}' is not valid"); break;
             }
@@ -135,10 +140,21 @@ public class Server
         if (!connectedPlayers.ContainsKey(e.ip))
             return;
 
+        string leavingName = connectedPlayers[e.ip].name;
+
         // Send that this player has disconnected & remove them
         sendPlayerConnection(e.ip, false);
         connectedPlayers.Remove(e.ip);
         Core.removeUnusedGameData(connectedPlayers);
+
+        if (leavingName == _sessionEnemyHostName)
+        {
+            _sessionEnemyHostName = connectedPlayers.Count > 0
+                ? connectedPlayers.Values.First().name
+                : string.Empty;
+            BroadcastSessionEnemyHost();
+            Logger.Info($"Session enemy host left → now '{_sessionEnemyHostName}'");
+        }
     }
 
     private PlayerInfo getCurrentPlayer(string ip)
@@ -522,13 +538,44 @@ public class Server
         Logger.Info("Player connection accepted");
         PlayerInfo newPlayer = new PlayerInfo(name, team);
         connectedPlayers.Add(playerIp, newPlayer);
+
+        // First accepted connection becomes preferred enemy-AI host (server operator joins first)
+        bool newlyPreferred = false;
+        if (string.IsNullOrEmpty(_sessionEnemyHostName))
+        {
+            _sessionEnemyHostName = name;
+            newlyPreferred = true;
+            Logger.Info($"Session enemy host set to '{_sessionEnemyHostName}'");
+        }
+
         sendPlayerConnection(playerIp, true);
         sendPlayerIntro(playerIp, RefusalType.Accepted);
+
+        if (newlyPreferred)
+            BroadcastSessionEnemyHost();
     }
 
     private byte[] getIntroPacket(byte response)
     {
-        return new byte[] { response };
+        // Protocol 12+: Accepted intro includes preferred enemy-host name
+        var bytes = new List<byte> { response };
+        if (response == (byte)RefusalType.Accepted)
+        {
+            byte[] nameBytes = Encoding.UTF8.GetBytes(_sessionEnemyHostName ?? string.Empty);
+            bytes.Add((byte)nameBytes.Length);
+            bytes.AddRange(nameBytes);
+        }
+        return bytes.ToArray();
+    }
+
+    private void BroadcastSessionEnemyHost()
+    {
+        byte[] nameBytes = Encoding.UTF8.GetBytes(_sessionEnemyHostName ?? string.Empty);
+        var body = new List<byte> { (byte)nameBytes.Length };
+        body.AddRange(nameBytes);
+        byte[] packet = body.ToArray();
+        foreach (string ip in connectedPlayers.Keys)
+            Send(ip, packet, NetworkType.SessionEnemyHost);
     }
 
     // Progress
@@ -745,5 +792,5 @@ public class Server
         return bytes.ToArray();
     }
 
-    private const byte PROTOCOL_VERSION = 11;
+    private const byte PROTOCOL_VERSION = 12;
 }

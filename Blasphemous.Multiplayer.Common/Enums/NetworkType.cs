@@ -33,4 +33,7 @@ public enum NetworkType
 
     /// <summary>Host enemy hit a remote player's avatar — apply HP on that client's Penitent.</summary>
     EnemyPlayerHit = 18,
+
+    /// <summary>Server names the preferred enemy-AI host (usually first connected / server operator).</summary>
+    SessionEnemyHost = 19,
 }

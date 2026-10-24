@@ -10,6 +10,11 @@
         public bool showOtherTeamOnMap;
         public bool enablePvP;
         public bool enableFriendlyFire;
+        /// <summary>
+        /// Optional override: this player name always owns enemy AI when in the room.
+        /// Empty = use the server's session preferred host (first player who connected).
+        /// </summary>
+        public string preferredEnemyHost;
         public SyncSettings syncSettings;
 
         // Default config
@@ -22,6 +27,7 @@
             showOtherTeamOnMap = false;
             enablePvP = true;
             enableFriendlyFire = false;
+            preferredEnemyHost = string.Empty;
             syncSettings = new SyncSettings();
         }
 

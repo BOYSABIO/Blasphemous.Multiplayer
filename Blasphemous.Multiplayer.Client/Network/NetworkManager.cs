@@ -18,9 +18,12 @@ namespace Blasphemous.Multiplayer.Client.Network
         private ConnectionStatus _connectionStatus = ConnectionStatus.Disconnected;
         private SimpleTcpClient _client;
         private string _serverIp = string.Empty;
+        private string _sessionEnemyHostName = string.Empty;
 
         public bool IsConnected => _connectionStatus == ConnectionStatus.Connected && _client != null;
         public string ServerIP => _serverIp;
+        /// <summary>Server-assigned preferred enemy AI host (first player who connected).</summary>
+        public string SessionEnemyHostName => _sessionEnemyHostName;
 
         private readonly List<byte> sendingQueue = new ();
         private readonly List<byte> receivingQueue = new ();
@@ -72,6 +75,7 @@ namespace Blasphemous.Multiplayer.Client.Network
         {
             _connectionStatus = ConnectionStatus.Disconnected;
             _serverIp = string.Empty;
+            _sessionEnemyHostName = string.Empty;
             _client = null;
             sendingQueue.Clear();
             receivingQueue.Clear();
@@ -157,6 +161,7 @@ namespace Blasphemous.Multiplayer.Client.Network
                         case NetworkType.EnemyDeath: ReceiveEnemyDeath(messageData); break;
                         case NetworkType.EnemySyncRequest: ReceiveEnemySyncRequest(messageData); break;
                         case NetworkType.EnemyPlayerHit: ReceiveEnemyPlayerHit(messageData); break;
+                        case NetworkType.SessionEnemyHost: ReceiveSessionEnemyHost(messageData); break;
                     }
                     startIdx += 3 + length;
                 }
@@ -376,16 +381,36 @@ namespace Blasphemous.Multiplayer.Client.Network
 
             if (success)
             {
-                // Successfully connected and can sync data now
                 _connectionStatus = ConnectionStatus.Connected;
+                // Protocol 12+: preferred enemy host name after response byte
+                if (data.Length > 1)
+                {
+                    byte len = data[1];
+                    if (len > 0 && 2 + len <= data.Length)
+                    {
+                        _sessionEnemyHostName = Encoding.UTF8.GetString(data, 2, len);
+                        ModLog.Info($"[EnemySync] Session preferred host = {_sessionEnemyHostName}");
+                    }
+                }
             }
             else
             {
-                // Rejected from server
                 Disconnect();
             }
 
             OnConnect?.Invoke(success, response);
+        }
+
+        private void ReceiveSessionEnemyHost(byte[] data)
+        {
+            if (data == null || data.Length < 1)
+                return;
+            byte len = data[0];
+            _sessionEnemyHostName = len > 0 && 1 + len <= data.Length
+                ? Encoding.UTF8.GetString(data, 1, len)
+                : string.Empty;
+            ModLog.Info($"[EnemySync] Session preferred host updated = {_sessionEnemyHostName}");
+            Main.Multiplayer.EnemyManager?.OnPlayersInSceneChanged();
         }
 
         // Progress
@@ -667,6 +692,6 @@ namespace Blasphemous.Multiplayer.Client.Network
         public delegate void ConnectDelegate(bool success, RefusalType refusal);
         public event ConnectDelegate OnConnect;
 
-        private const byte PROTOCOL_VERSION = 11;
+        private const byte PROTOCOL_VERSION = 12;
     }
 }
