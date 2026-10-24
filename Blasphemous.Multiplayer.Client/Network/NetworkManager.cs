@@ -509,11 +509,13 @@ namespace Blasphemous.Multiplayer.Client.Network
             Main.Multiplayer.EnemyManager.ReceiveState(sender, netId, position, life, alive, facingRight);
         }
 
-        public void SendEnemyDamage(int netId, float amount)
+        public void SendEnemyDamage(int netId, float amount, Vector2 hitPos)
         {
             List<byte> bytes = new();
             bytes.AddRange(BitConverter.GetBytes(netId));
             bytes.AddRange(BitConverter.GetBytes(amount));
+            bytes.AddRange(BitConverter.GetBytes(hitPos.x));
+            bytes.AddRange(BitConverter.GetBytes(hitPos.y));
             QueueMesssage(bytes.ToArray(), NetworkType.EnemyDamage);
         }
 
@@ -522,7 +524,15 @@ namespace Blasphemous.Multiplayer.Client.Network
             int startIdx = ExtractNameFromData(data, out string attackerName);
             int netId = BitConverter.ToInt32(data, startIdx);
             float amount = BitConverter.ToSingle(data, startIdx + 4);
-            Main.Multiplayer.EnemyManager.ReceiveDamage(netId, amount, attackerName);
+            // Protocol 6+: hit position for remapping when client ids disagree
+            Vector2 hitPos = Vector2.zero;
+            if (data.Length >= startIdx + 16)
+            {
+                hitPos = new Vector2(
+                    BitConverter.ToSingle(data, startIdx + 8),
+                    BitConverter.ToSingle(data, startIdx + 12));
+            }
+            Main.Multiplayer.EnemyManager.ReceiveDamage(netId, amount, attackerName, hitPos);
         }
 
         public void SendEnemyDeath(int netId)
@@ -591,6 +601,6 @@ namespace Blasphemous.Multiplayer.Client.Network
         public delegate void ConnectDelegate(bool success, RefusalType refusal);
         public event ConnectDelegate OnConnect;
 
-        private const byte PROTOCOL_VERSION = 5;
+        private const byte PROTOCOL_VERSION = 6;
     }
 }

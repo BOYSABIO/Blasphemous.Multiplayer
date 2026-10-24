@@ -187,11 +187,13 @@ namespace Blasphemous.Multiplayer.Client.Enemies
             if (_isSceneHost)
                 return false;
 
+            // Prefer host-assigned id if this enemy was bound from a snapshot
             int netId = GetOrAssignNetId(enemy);
             if (!_enemies.ContainsKey(netId))
                 RegisterEnemy(enemy, netId);
 
-            Main.Multiplayer.NetworkManager.SendEnemyDamage(netId, amount);
+            Vector2 pos = enemy.transform.position;
+            Main.Multiplayer.NetworkManager.SendEnemyDamage(netId, amount, pos);
             return true;
         }
 
@@ -227,21 +229,28 @@ namespace Blasphemous.Multiplayer.Client.Enemies
             ApplyRemoteState(synced, position, life, alive, facingRight);
         }
 
-        public void ReceiveDamage(int netId, float amount, string attackerName)
+        public void ReceiveDamage(int netId, float amount, string attackerName, Vector2 hitPos)
         {
             if (!_isSceneHost)
                 return;
 
             if (!_enemies.TryGetValue(netId, out SyncedEnemy synced) || !synced.IsValid)
             {
-                // Try locate and register, then apply
-                Enemy found = FindEnemyByNetId(netId, null, Vector2.zero);
+                // ID mismatch between clients is common — fall back to nearest living enemy at hit position
+                Enemy found = FindEnemyByNetId(netId, null, hitPos);
+                if (found == null)
+                    found = FindNearestLivingEnemy(hitPos, 6f);
+
                 if (found == null)
                 {
-                    ModLog.Warn($"[EnemySync] Damage miss {netId} from {attackerName}");
+                    ModLog.Warn($"[EnemySync] Damage miss id={netId} pos={hitPos} from {attackerName}");
                     return;
                 }
-                synced = RegisterEnemy(found, netId);
+
+                // Re-key under the attacker's id OR our local stable id so future hits match
+                int localId = GetOrAssignNetId(found);
+                synced = RegisterEnemy(found, localId);
+                ModLog.Info($"[EnemySync] Damage remapped {netId} → {localId} ({synced.EnemyTypeId}) from {attackerName}");
             }
 
             if (synced.Enemy.Dead)
@@ -464,6 +473,19 @@ namespace Blasphemous.Multiplayer.Client.Enemies
 
         private SyncedEnemy RegisterEnemy(Enemy enemy, int netId)
         {
+            // Same GameObject must not live under two different net ids (local hash vs host hash)
+            var orphanKeys = new List<int>();
+            foreach (var kv in _enemies)
+            {
+                if (kv.Key != netId && kv.Value.IsValid && kv.Value.Enemy == enemy)
+                    orphanKeys.Add(kv.Key);
+            }
+            foreach (int key in orphanKeys)
+            {
+                ModLog.Info($"[EnemySync] Re-key remove {key} → {netId}");
+                _enemies.Remove(key);
+            }
+
             if (_enemies.TryGetValue(netId, out SyncedEnemy existing))
             {
                 existing.Bind(enemy);
@@ -488,9 +510,37 @@ namespace Blasphemous.Multiplayer.Client.Enemies
 
             Enemy found = FindEnemyByNetId(netId, enemyTypeId, position);
             if (found == null)
+                found = FindNearestLivingEnemy(position, 10f, enemyTypeId);
+
+            if (found == null)
                 return null;
 
+            // Force host's net id onto this local enemy (drops provisional local hash)
             return RegisterEnemy(found, netId);
+        }
+
+        private Enemy FindNearestLivingEnemy(Vector2 hintPos, float maxDist, string enemyTypeId = null)
+        {
+            Enemy[] found = UnityEngine.Object.FindObjectsOfType<Enemy>();
+            Enemy best = null;
+            float bestDist = maxDist;
+
+            foreach (Enemy enemy in found)
+            {
+                if (!IsSyncableEnemy(enemy) || enemy.Dead)
+                    continue;
+                if (!string.IsNullOrEmpty(enemyTypeId) && enemy.Id != enemyTypeId)
+                    continue;
+
+                float d = Vector2.Distance(enemy.transform.position, hintPos);
+                if (d <= bestDist)
+                {
+                    bestDist = d;
+                    best = enemy;
+                }
+            }
+
+            return best;
         }
 
         private void ApplyRemoteState(SyncedEnemy synced, Vector2 position, float life, bool alive, bool facingRight)
