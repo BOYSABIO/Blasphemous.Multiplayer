@@ -3,24 +3,29 @@ using Framework.FrameworkCore;
 using Gameplay.GameControllers.Entities;
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Text;
+using Tools.Level.Layout;
 using UnityEngine;
 
 namespace Blasphemous.Multiplayer.Client.Enemies
 {
     /// <summary>
     /// Host-authoritative room-enemy sync for the current scene.
-    /// Scene host runs real AI; other clients treat local enemies as puppets.
+    /// Scene host = first player who entered this scene (sticky). They run AI; others puppet.
     /// </summary>
     public class EnemyManager
     {
         private readonly Dictionary<int, SyncedEnemy> _enemies = new();
         private readonly float _positionCutoff = 0.05f;
         private readonly float _lifeCutoff = 0.5f;
-        private readonly float _scanInterval = 0.5f;
+        private readonly float _scanInterval = 0.35f;
+        private readonly float _snapshotInterval = 1.0f;
         private float _scanTimer;
+        private float _snapshotTimer;
         private bool _isSceneHost;
         private string _currentScene = string.Empty;
+        private string _sceneHostName = string.Empty;
         private bool _applyingRemoteDamage;
 
         public bool IsSceneHost => _isSceneHost;
@@ -34,25 +39,27 @@ namespace Blasphemous.Multiplayer.Client.Enemies
         {
             Clear();
             _currentScene = scene ?? string.Empty;
+            _sceneHostName = string.Empty;
 
             if (!Main.Multiplayer.CurrentlyInLevel || !Main.Multiplayer.NetworkManager.IsConnected)
                 return;
 
-            RecalculateHost();
-            ScanAndRegisterEnemies(forceSnapshot: true);
-            ModLog.Info($"[EnemySync] Level {scene} — sceneHost={_isSceneHost}, tracked={_enemies.Count}");
+            // Sticky host: if someone is already in this scene, they keep host; else we claim it.
+            ClaimOrFollowExistingHost();
+            ScanAndRegisterEnemies(forceSnapshot: _isSceneHost);
+            ModLog.Info($"[EnemySync] Level {scene} — sceneHost={_isSceneHost} (host={_sceneHostName}), tracked={_enemies.Count}");
         }
 
         public void LevelUnloaded()
         {
             Clear();
             _currentScene = string.Empty;
+            _sceneHostName = string.Empty;
             _isSceneHost = false;
         }
 
         public void OnDisconnect()
         {
-            // Restore local AI if we had turned enemies into puppets
             foreach (var synced in _enemies.Values)
             {
                 if (synced.IsValid && synced.IsPuppet)
@@ -60,22 +67,27 @@ namespace Blasphemous.Multiplayer.Client.Enemies
             }
             Clear();
             _isSceneHost = false;
+            _sceneHostName = string.Empty;
         }
 
+        /// <summary>Called when another player enters/leaves this scene.</summary>
         public void OnPlayersInSceneChanged()
         {
             if (!Main.Multiplayer.CurrentlyInLevel || !Main.Multiplayer.NetworkManager.IsConnected)
                 return;
 
             bool wasHost = _isSceneHost;
-            RecalculateHost();
-            if (wasHost == _isSceneHost)
-                return;
-
-            ModLog.Info($"[EnemySync] Host changed → {_isSceneHost}");
+            RecalculateHostAfterRosterChange();
             ApplyAuthorityToAll();
+
+            if (wasHost != _isSceneHost)
+                ModLog.Info($"[EnemySync] Host changed → {_isSceneHost} (host={_sceneHostName})");
+
             if (_isSceneHost)
+            {
                 ScanAndRegisterEnemies(forceSnapshot: true);
+                SendAllSnapshots();
+            }
         }
 
         public void Update()
@@ -93,6 +105,13 @@ namespace Blasphemous.Multiplayer.Client.Enemies
             if (!_isSceneHost)
                 return;
 
+            _snapshotTimer -= Time.deltaTime;
+            if (_snapshotTimer <= 0f)
+            {
+                _snapshotTimer = _snapshotInterval;
+                SendAllSnapshots();
+            }
+
             foreach (var synced in _enemies.Values)
             {
                 if (!synced.IsValid)
@@ -103,6 +122,7 @@ namespace Blasphemous.Multiplayer.Client.Enemies
                     if (synced.LastSentAlive)
                     {
                         synced.LastSentAlive = false;
+                        ModLog.Info($"[EnemySync] Send death {synced.NetId}");
                         Main.Multiplayer.NetworkManager.SendEnemyDeath(synced.NetId);
                     }
                     continue;
@@ -110,8 +130,7 @@ namespace Blasphemous.Multiplayer.Client.Enemies
 
                 Vector2 pos = synced.Enemy.transform.position;
                 float life = synced.Enemy.CurrentLife;
-                bool facingRight = synced.Enemy.Status == null
-                    || synced.Enemy.Status.Orientation == EntityOrientation.Right;
+                bool facingRight = IsFacingRight(synced.Enemy);
 
                 bool moved = Mathf.Abs(pos.x - synced.LastSentPosition.x) > _positionCutoff
                     || Mathf.Abs(pos.y - synced.LastSentPosition.y) > _positionCutoff;
@@ -129,22 +148,24 @@ namespace Blasphemous.Multiplayer.Client.Enemies
             }
         }
 
-        /// <summary>
-        /// Non-host: forward player damage to the scene host instead of applying locally.
-        /// </summary>
         public bool TryInterceptDamage(Enemy enemy, float amount)
         {
-            if (_applyingRemoteDamage || _isSceneHost || enemy == null)
+            if (_applyingRemoteDamage || enemy == null)
                 return false;
             if (!IsSyncableEnemy(enemy))
                 return false;
             if (!Main.Multiplayer.NetworkManager.IsConnected)
                 return false;
 
+            // Host applies locally; Update/death broadcast will sync
+            if (_isSceneHost)
+                return false;
+
             int netId = ResolveNetId(enemy);
             if (!_enemies.ContainsKey(netId))
                 RegisterEnemy(enemy, sendSnapshot: false);
 
+            ModLog.Info($"[EnemySync] Forward damage {amount} → host for {netId}");
             Main.Multiplayer.NetworkManager.SendEnemyDamage(netId, amount);
             return true;
         }
@@ -154,15 +175,11 @@ namespace Blasphemous.Multiplayer.Client.Enemies
             if (_isSceneHost)
                 return;
 
-            if (!_enemies.TryGetValue(netId, out SyncedEnemy synced) || !synced.IsValid)
+            SyncedEnemy synced = BindRemoteEnemy(netId, enemyTypeId, position);
+            if (synced == null)
             {
-                Enemy found = FindEnemyByNetId(netId, enemyTypeId, position);
-                if (found == null)
-                {
-                    ModLog.Warn($"[EnemySync] Snapshot for {netId} ({enemyTypeId}) — no local enemy");
-                    return;
-                }
-                synced = RegisterEnemy(found, sendSnapshot: false);
+                ModLog.Warn($"[EnemySync] Snapshot miss id={netId} type={enemyTypeId} at {position}");
+                return;
             }
 
             ApplyRemoteState(synced, position, life, alive, facingRight);
@@ -173,14 +190,9 @@ namespace Blasphemous.Multiplayer.Client.Enemies
             if (_isSceneHost)
                 return;
 
-            if (!_enemies.TryGetValue(netId, out SyncedEnemy synced) || !synced.IsValid)
-            {
-                // Late state without snapshot — try bind by id alone
-                Enemy found = FindEnemyByNetId(netId, null, position);
-                if (found == null)
-                    return;
-                synced = RegisterEnemy(found, sendSnapshot: false);
-            }
+            SyncedEnemy synced = BindRemoteEnemy(netId, null, position);
+            if (synced == null)
+                return;
 
             ApplyRemoteState(synced, position, life, alive, facingRight);
         }
@@ -190,12 +202,12 @@ namespace Blasphemous.Multiplayer.Client.Enemies
             if (!_isSceneHost)
                 return;
             if (!_enemies.TryGetValue(netId, out SyncedEnemy synced) || !synced.IsValid || synced.Enemy.Dead)
+            {
+                ModLog.Warn($"[EnemySync] Damage for unknown/dead {netId} from {attackerName}");
                 return;
+            }
 
-            // Ignore our own forwarded packet if somehow looped; host applies for everyone including self locally already
-            if (!string.IsNullOrEmpty(attackerName) && attackerName == Main.Multiplayer.PlayerName)
-                return;
-
+            ModLog.Info($"[EnemySync] Apply remote damage {amount} on {netId} from {attackerName}");
             _applyingRemoteDamage = true;
             try
             {
@@ -208,8 +220,7 @@ namespace Blasphemous.Multiplayer.Client.Enemies
 
             Vector2 pos = synced.Enemy.transform.position;
             float life = synced.Enemy.CurrentLife;
-            bool facingRight = synced.Enemy.Status == null
-                || synced.Enemy.Status.Orientation == EntityOrientation.Right;
+            bool facingRight = IsFacingRight(synced.Enemy);
             bool alive = !synced.Enemy.Dead;
 
             synced.LastSentPosition = pos;
@@ -218,9 +229,14 @@ namespace Blasphemous.Multiplayer.Client.Enemies
             synced.LastSentFacingRight = facingRight;
 
             if (!alive)
+            {
+                ModLog.Info($"[EnemySync] Send death {netId}");
                 Main.Multiplayer.NetworkManager.SendEnemyDeath(netId);
+            }
             else
+            {
                 Main.Multiplayer.NetworkManager.SendEnemyState(netId, pos, life, true, facingRight);
+            }
         }
 
         public void ReceiveDeath(int netId)
@@ -228,29 +244,37 @@ namespace Blasphemous.Multiplayer.Client.Enemies
             if (_isSceneHost)
                 return;
             if (!_enemies.TryGetValue(netId, out SyncedEnemy synced) || !synced.IsValid)
-                return;
+            {
+                // Try bind by id alone among living
+                Enemy found = FindEnemyByNetId(netId, null, Vector2.zero);
+                if (found == null)
+                    return;
+                synced = RegisterEnemy(found, sendSnapshot: false);
+            }
 
             if (!synced.Enemy.Dead)
             {
+                ModLog.Info($"[EnemySync] Apply remote death {netId}");
                 _applyingRemoteDamage = true;
-                try
-                {
-                    synced.Enemy.Kill();
-                }
-                finally
-                {
-                    _applyingRemoteDamage = false;
-                }
+                try { synced.Enemy.Kill(); }
+                finally { _applyingRemoteDamage = false; }
             }
             synced.LastSentAlive = false;
         }
 
-        /// <summary>Host sends full snapshots to a peer who just entered this scene (via broadcast).</summary>
+        public void ForceRescan()
+        {
+            if (!Main.Multiplayer.CurrentlyInLevel || !Main.Multiplayer.NetworkManager.IsConnected)
+                return;
+            ScanAndRegisterEnemies(forceSnapshot: _isSceneHost);
+        }
+
         public void SendAllSnapshots()
         {
             if (!_isSceneHost)
                 return;
 
+            int sent = 0;
             foreach (var synced in _enemies.Values)
             {
                 if (!synced.IsValid || synced.Enemy.Dead)
@@ -258,26 +282,84 @@ namespace Blasphemous.Multiplayer.Client.Enemies
 
                 Vector2 pos = synced.Enemy.transform.position;
                 float life = synced.Enemy.CurrentLife;
-                bool facingRight = synced.Enemy.Status == null
-                    || synced.Enemy.Status.Orientation == EntityOrientation.Right;
+                bool facingRight = IsFacingRight(synced.Enemy);
                 Main.Multiplayer.NetworkManager.SendEnemySnapshot(
                     synced.NetId, synced.EnemyTypeId, pos, life, true, facingRight);
+                sent++;
+            }
+            if (sent > 0)
+                ModLog.Info($"[EnemySync] Sent {sent} snapshots");
+        }
+
+        private void ClaimOrFollowExistingHost()
+        {
+            // If another active player is already here, they are host (first one we know about by name for stability among present).
+            // Sticky: the lexicographically first player *currently in the scene* including us — BUT we prefer
+            // keeping an already-assigned host if they are still present.
+            string local = Main.Multiplayer.PlayerName ?? string.Empty;
+            var present = GetPlayersInScene();
+            if (present.Count == 0)
+            {
+                _sceneHostName = local;
+                _isSceneHost = true;
+                return;
+            }
+
+            // Prefer existing host if still present
+            if (!string.IsNullOrEmpty(_sceneHostName) && present.Contains(_sceneHostName))
+            {
+                _isSceneHost = _sceneHostName == local;
+                return;
+            }
+
+            // First entrant wins: among present, pick the one who has been "scene host" — we approximate
+            // by choosing lexicographically first ONLY when claiming fresh. When we just entered and others
+            // are present, we are NOT host (they were here first / or we defer to alphabetical among them only).
+            bool othersPresent = present.Any(p => p != local);
+            if (othersPresent)
+            {
+                // Someone else is already in the scene — they own it. Pick deterministic host among them (not us).
+                string otherHost = present.Where(p => p != local).OrderBy(p => p, StringComparer.Ordinal).First();
+                _sceneHostName = otherHost;
+                _isSceneHost = false;
+            }
+            else
+            {
+                _sceneHostName = local;
+                _isSceneHost = true;
             }
         }
 
-        private void RecalculateHost()
+        private void RecalculateHostAfterRosterChange()
         {
-            // Scene host = lexicographically first player name among players currently in this scene (including self).
-            string best = Main.Multiplayer.PlayerName ?? string.Empty;
+            string local = Main.Multiplayer.PlayerName ?? string.Empty;
+            var present = GetPlayersInScene();
+
+            // If current host left, elect sticky replacement: first alphabetical among remaining (including us)
+            if (string.IsNullOrEmpty(_sceneHostName) || !present.Contains(_sceneHostName))
+            {
+                _sceneHostName = present.OrderBy(p => p, StringComparer.Ordinal).FirstOrDefault() ?? local;
+            }
+
+            _isSceneHost = _sceneHostName == local;
+        }
+
+        private List<string> GetPlayersInScene()
+        {
+            var names = new List<string>();
+            string local = Main.Multiplayer.PlayerName;
+            if (!string.IsNullOrEmpty(local))
+                names.Add(local);
+
             foreach (var other in Main.Multiplayer.OtherPlayerManager.AllActivePlayers)
             {
                 if (other == null || string.IsNullOrEmpty(other.name))
                     continue;
                 string name = other.name.StartsWith("_") ? other.name.Substring(1) : other.name;
-                if (string.IsNullOrEmpty(best) || string.CompareOrdinal(name, best) < 0)
-                    best = name;
+                if (!names.Contains(name))
+                    names.Add(name);
             }
-            _isSceneHost = !string.IsNullOrEmpty(best) && best == Main.Multiplayer.PlayerName;
+            return names;
         }
 
         private void ApplyAuthorityToAll()
@@ -303,13 +385,13 @@ namespace Blasphemous.Multiplayer.Client.Enemies
                 {
                     if (_enemies[netId].Enemy != enemy)
                         _enemies[netId].Bind(enemy);
+                    _enemies[netId].SetPuppet(!_isSceneHost);
                     continue;
                 }
 
-                RegisterEnemy(enemy, sendSnapshot: _isSceneHost && forceSnapshot);
+                RegisterEnemy(enemy, sendSnapshot: false);
             }
 
-            // Drop destroyed references
             var stale = new List<int>();
             foreach (var kv in _enemies)
             {
@@ -341,11 +423,25 @@ namespace Blasphemous.Multiplayer.Client.Enemies
             if (sendSnapshot && _isSceneHost && !enemy.Dead)
             {
                 Main.Multiplayer.NetworkManager.SendEnemySnapshot(
-                    netId, synced.EnemyTypeId, enemy.transform.position, enemy.CurrentLife, true,
-                    enemy.Status == null || enemy.Status.Orientation == EntityOrientation.Right);
+                    netId, synced.EnemyTypeId, enemy.transform.position, enemy.CurrentLife, true, IsFacingRight(enemy));
             }
 
             return synced;
+        }
+
+        private SyncedEnemy BindRemoteEnemy(int netId, string enemyTypeId, Vector2 position)
+        {
+            if (_enemies.TryGetValue(netId, out SyncedEnemy synced) && synced.IsValid)
+            {
+                synced.SetPuppet(true);
+                return synced;
+            }
+
+            Enemy found = FindEnemyByNetId(netId, enemyTypeId, position);
+            if (found == null)
+                return null;
+
+            return RegisterEnemy(found, sendSnapshot: false);
         }
 
         private void ApplyRemoteState(SyncedEnemy synced, Vector2 position, float life, bool alive, bool facingRight)
@@ -376,7 +472,6 @@ namespace Blasphemous.Multiplayer.Client.Enemies
                 return;
             }
 
-            // Nudge life toward host value without re-entering damage hooks
             if (Mathf.Abs(synced.Enemy.CurrentLife - life) > 0.1f)
                 synced.Enemy.CurrentLife = life;
 
@@ -409,15 +504,31 @@ namespace Blasphemous.Multiplayer.Client.Enemies
                         best = enemy;
                     }
                 }
+                else if (string.IsNullOrEmpty(enemyTypeId))
+                {
+                    float d = Vector2.Distance(enemy.transform.position, hintPos);
+                    if (d < bestDist)
+                    {
+                        bestDist = d;
+                        best = enemy;
+                    }
+                }
             }
 
-            return bestDist < 3f ? best : null;
+            // Generous match — spawn layouts can differ slightly
+            return bestDist < 8f ? best : null;
         }
 
         private void Clear()
         {
             _enemies.Clear();
             _scanTimer = 0f;
+            _snapshotTimer = 0f;
+        }
+
+        private static bool IsFacingRight(Enemy enemy)
+        {
+            return enemy.Status == null || enemy.Status.Orientation == EntityOrientation.Right;
         }
 
         public static bool IsSyncableEnemy(Enemy enemy)
@@ -426,7 +537,7 @@ namespace Blasphemous.Multiplayer.Client.Enemies
                 return false;
             if (string.IsNullOrEmpty(enemy.Id))
                 return false;
-            if (enemy.Id == "EV09") // Dummy / special
+            if (enemy.Id == "EV09")
                 return false;
 
             Type t = enemy.GetType();
@@ -447,9 +558,14 @@ namespace Blasphemous.Multiplayer.Client.Enemies
             if (enemy.SpawningId != 0)
                 return enemy.SpawningId;
 
-            // Fallback: stable hash from type id + rounded spawn position
+            // Prefer EnemySpawnPoint id when present
+            var spawn = enemy.GetComponentInParent<EnemySpawnPoint>();
+            if (spawn != null && spawn.SpawningId != 0)
+                return spawn.SpawningId;
+
+            // Deterministic fallback: type + rounded spawn position (same on all clients for scene-placed enemies)
             Vector3 p = enemy.transform.position;
-            string key = $"{enemy.Id}|{Mathf.RoundToInt(p.x)}|{Mathf.RoundToInt(p.y)}";
+            string key = $"{enemy.Id}|{Mathf.RoundToInt(p.x * 2f) / 2f}|{Mathf.RoundToInt(p.y * 2f) / 2f}";
             return StableHash(key);
         }
 
@@ -461,7 +577,6 @@ namespace Blasphemous.Multiplayer.Client.Enemies
                 byte[] bytes = Encoding.UTF8.GetBytes(value);
                 for (int i = 0; i < bytes.Length; i++)
                     hash = hash * 31 + bytes[i];
-                // Keep non-zero so we never collide with "unset" SpawningId semantics accidentally as 0
                 return hash == 0 ? 1 : hash;
             }
         }
