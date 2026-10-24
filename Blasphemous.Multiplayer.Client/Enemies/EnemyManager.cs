@@ -33,8 +33,11 @@ namespace Blasphemous.Multiplayer.Client.Enemies
         private float _retargetTimer;
         private readonly float _remoteHitCooldownSeconds = 0.4f;
         private readonly float _aggroStickyBonus = 2.5f;
-        private readonly float _remoteContactRange = 1.75f;
-        private readonly float _remoteContactRangeAttacking = 2.4f;
+        private readonly float _hostContactCooldownSeconds = 0.4f;
+        private float _hostContactCooldown;
+        /// <summary>Shared with ContactAttack redirect patch.</summary>
+        public const float ContactRange = 1.75f;
+        public const float ContactRangeAttacking = 2.4f;
         private readonly float[] _deferredScanAt = { 0.25f, 0.75f, 1.5f, 3.0f };
         private int _deferredScanIndex;
         private float _levelAge;
@@ -151,17 +154,22 @@ namespace Blasphemous.Multiplayer.Client.Enemies
             }
 
             TickRemoteHitCooldowns();
+            TickDeferredDeathHides();
 
             if (!_isSceneHost)
                 return;
 
-            // One shared AI: retarget + ensure remote players take contact/attack hits
+            if (_hostContactCooldown > 0f)
+                _hostContactCooldown -= Time.deltaTime;
+
+            // One shared AI: retarget + contact pulses for whoever is in range
             _retargetTimer -= Time.deltaTime;
             if (_retargetTimer <= 0f)
             {
                 _retargetTimer = _retargetInterval;
                 RetargetEnemiesToNearestPlayer();
                 PulseRemoteContactHits();
+                PulseHostContactHits();
             }
 
             _snapshotTimer -= Time.deltaTime;
@@ -301,32 +309,82 @@ namespace Blasphemous.Multiplayer.Client.Enemies
         }
 
         /// <summary>
-        /// Belt-and-suspenders: when a shared enemy is on top of a remote avatar,
-        /// push contact damage even if a specific attack hardcoded Penitent.
+        /// When a shared enemy is on top of a remote avatar, push contact damage
+        /// even if a specific attack hardcoded Penitent.
         /// </summary>
         private void PulseRemoteContactHits()
         {
             foreach (var synced in UniqueEnemies())
             {
-                if (!synced.IsValid || synced.Enemy.Dead || synced.IsPuppet)
+                if (!synced.IsValid || synced.Enemy.Dead || synced.IsPuppet || synced.VisuallyDead)
                     continue;
 
-                GameObject targetGo = synced.Enemy.Target;
-                if (targetGo == null)
+                foreach (OtherPlayerScript other in Main.Multiplayer.OtherPlayerManager.AllActivePlayers)
+                {
+                    if (other == null || string.IsNullOrEmpty(other.PlayerName))
+                        continue;
+
+                    float dist = Vector2.Distance(synced.Enemy.transform.position, other.transform.position);
+                    float range = synced.Enemy.IsAttacking ? ContactRangeAttacking : ContactRange;
+                    if (dist > range)
+                        continue;
+
+                    float amount = EstimateContactDamage(synced.Enemy);
+                    NotifyRemotePlayerHitByEnemy(other.PlayerName, amount);
+                }
+            }
+        }
+
+        /// <summary>
+        /// Host contact pulse: if Penitent overlaps an enemy while AI still targets the friend,
+        /// apply local contact so the host is not unhittable.
+        /// </summary>
+        private void PulseHostContactHits()
+        {
+            if (_hostContactCooldown > 0f)
+                return;
+            if (Core.Logic.Penitent == null || Core.Logic.Penitent.Dead)
+                return;
+
+            foreach (var synced in UniqueEnemies())
+            {
+                if (!synced.IsValid || synced.Enemy.Dead || synced.IsPuppet || synced.VisuallyDead)
                     continue;
 
-                OtherPlayerScript other = targetGo.GetComponent<OtherPlayerScript>()
-                    ?? targetGo.GetComponentInParent<OtherPlayerScript>();
-                if (other == null || string.IsNullOrEmpty(other.PlayerName))
-                    continue;
-
-                float dist = Vector2.Distance(synced.Enemy.transform.position, targetGo.transform.position);
-                float range = synced.Enemy.IsAttacking ? _remoteContactRangeAttacking : _remoteContactRange;
+                float dist = Vector2.Distance(
+                    synced.Enemy.transform.position,
+                    Core.Logic.Penitent.transform.position);
+                float range = synced.Enemy.IsAttacking ? ContactRangeAttacking : ContactRange;
                 if (dist > range)
                     continue;
 
                 float amount = EstimateContactDamage(synced.Enemy);
-                NotifyRemotePlayerHitByEnemy(other.PlayerName, amount);
+                _hostContactCooldown = _hostContactCooldownSeconds;
+
+                var hit = new Hit
+                {
+                    AttackingEntity = synced.Enemy.gameObject,
+                    DamageAmount = amount,
+                    DamageElement = DamageArea.DamageElement.Normal,
+                    DamageType = DamageArea.DamageType.Normal,
+                    Force = 1f,
+                    ThrowbackDirByOwnerPosition = true,
+                    Unparriable = true,
+                    Unblockable = true,
+                    Unnavoidable = true,
+                };
+                ModLog.Info($"[EnemySync] Host contact pulse {synced.NetId} for {amount:0.#}");
+                Core.Logic.Penitent.Damage(hit);
+                return; // one pulse per cooldown window
+            }
+        }
+
+        private void TickDeferredDeathHides()
+        {
+            foreach (var synced in UniqueEnemies())
+            {
+                if (synced != null)
+                    synced.TickDeferredHide();
             }
         }
 
@@ -1166,6 +1224,7 @@ namespace Blasphemous.Multiplayer.Client.Enemies
             _snapshotTimer = 0f;
             _retargetTimer = 0f;
             _requestCooldown = 0f;
+            _hostContactCooldown = 0f;
             _snapshotLogCooldown = 0;
             _levelAge = 0f;
             _deferredScanIndex = 0;

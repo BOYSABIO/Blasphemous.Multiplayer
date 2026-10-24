@@ -38,8 +38,8 @@ namespace Blasphemous.Multiplayer.Client.Enemies
 
     /// <summary>
     /// Many enemy attacks call ContactAttack(Core.Logic.Penitent) even when the AI Target
-    /// is a remote co-op avatar. Redirect the hit onto that avatar so one shared enemy
-    /// can damage either player.
+    /// is a remote co-op avatar. Redirect only when the local Penitent is out of contact range
+    /// so the host still takes hits when standing on the enemy.
     /// </summary>
     [HarmonyPatch(typeof(EnemyAttack), nameof(EnemyAttack.ContactAttack))]
     class Enemy_ContactAttack_Redirect_Patch
@@ -61,9 +61,15 @@ namespace Blasphemous.Multiplayer.Client.Enemies
             if (remote == null)
                 return;
 
-            // Only redirect when the game was about to hit the local Penitent (or null)
-            if (damageable == null || IsLocalPenitent(damageable))
-                damageable = remote;
+            // Only consider redirect when the game was about to hit local Penitent (or null)
+            if (damageable != null && !IsLocalPenitent(damageable))
+                return;
+
+            // Host is in contact range — keep the real Penitent hit
+            if (IsPenitentInContactRange(enemy))
+                return;
+
+            damageable = remote;
         }
 
         private static OtherPlayerScript ResolveRemoteTarget(Enemy enemy)
@@ -81,6 +87,20 @@ namespace Blasphemous.Multiplayer.Client.Enemies
             if (damageable is Component c)
                 return c.GetComponentInParent<Penitent>() != null;
             return false;
+        }
+
+        private static bool IsPenitentInContactRange(Enemy enemy)
+        {
+            if (Core.Logic.Penitent == null || Core.Logic.Penitent.Dead)
+                return false;
+
+            float dist = Vector2.Distance(
+                enemy.transform.position,
+                Core.Logic.Penitent.transform.position);
+            float range = enemy.IsAttacking
+                ? EnemyManager.ContactRangeAttacking
+                : EnemyManager.ContactRange;
+            return dist <= range;
         }
     }
 

@@ -10,6 +10,8 @@ namespace Blasphemous.Multiplayer.Client.Enemies
     /// </summary>
     public class SyncedEnemy
     {
+        public const float DeathHideDelaySeconds = 1.35f;
+
         public int NetId { get; }
         public string EnemyTypeId { get; }
         public Enemy Enemy { get; private set; }
@@ -23,6 +25,9 @@ namespace Blasphemous.Multiplayer.Client.Enemies
 
         public bool IsPuppet { get; private set; }
         public bool VisuallyDead { get; private set; }
+        public bool BodyHidden { get; private set; }
+        /// <summary>Unity time when the corpse should hard-hide (0 = none).</summary>
+        public float HideBodyAt { get; private set; }
 
         public SyncedEnemy(int netId, string enemyTypeId, Enemy enemy)
         {
@@ -35,6 +40,8 @@ namespace Blasphemous.Multiplayer.Client.Enemies
         {
             Enemy = enemy;
             VisuallyDead = false;
+            BodyHidden = false;
+            HideBodyAt = 0f;
             if (enemy == null)
                 return;
 
@@ -66,12 +73,15 @@ namespace Blasphemous.Multiplayer.Client.Enemies
         /// </summary>
         public void ApplyAnim(int animHash, float normalizedTime)
         {
-            if (VisuallyDead || LastSentAlive == false)
+            if (VisuallyDead || BodyHidden || LastSentAlive == false)
                 return;
             if (animHash == 0 || Enemy == null || Enemy.Animator == null)
                 return;
 
             Animator animator = Enemy.Animator;
+            if (!animator.enabled)
+                animator.enabled = true;
+
             AnimatorStateInfo current = animator.GetCurrentAnimatorStateInfo(0);
 
             if (current.shortNameHash != animHash)
@@ -81,7 +91,6 @@ namespace Blasphemous.Multiplayer.Client.Enemies
             }
             else
             {
-                // Same clip — keep playback in sync without restarting the swing
                 float local = current.normalizedTime % 1f;
                 float remote = normalizedTime % 1f;
                 if (Mathf.Abs(local - remote) > 0.12f)
@@ -101,7 +110,10 @@ namespace Blasphemous.Multiplayer.Client.Enemies
             {
                 IsPuppet = true;
                 ApplyPuppetState(true);
-                DisableCombatAndVisuals(hideSprite: VisuallyDead);
+                if (BodyHidden)
+                    HardHideBody();
+                else
+                    DisableOutboundAttackColliders();
                 return;
             }
 
@@ -116,9 +128,10 @@ namespace Blasphemous.Multiplayer.Client.Enemies
         }
 
         /// <summary>
-        /// Hard death for sync. Idempotent — safe to call repeatedly from dead snapshots.
+        /// Soft death: play Kill/death anim, keep body visible briefly, then hard-hide.
+        /// Idempotent — safe from repeated dead snapshots.
         /// </summary>
-        /// <returns>True if this call newly applied death visuals.</returns>
+        /// <returns>True if this call newly started the death sequence.</returns>
         public bool ForceVisualDeath()
         {
             if (Enemy == null)
@@ -126,9 +139,8 @@ namespace Blasphemous.Multiplayer.Client.Enemies
 
             if (VisuallyDead)
             {
-                // Already handled — keep body gone if something re-enabled it
-                if (Enemy.gameObject != null && Enemy.gameObject.activeSelf)
-                    Enemy.gameObject.SetActive(false);
+                if (BodyHidden)
+                    HardHideBody();
                 return false;
             }
 
@@ -136,8 +148,11 @@ namespace Blasphemous.Multiplayer.Client.Enemies
             LastSentAlive = false;
             LastSentLife = 0f;
             IsPuppet = true;
+            BodyHidden = false;
+            HideBodyAt = Time.time + DeathHideDelaySeconds;
 
             ApplyPuppetState(true);
+            DisableOutboundAttackColliders();
 
             if (!Enemy.Dead)
             {
@@ -148,7 +163,7 @@ namespace Blasphemous.Multiplayer.Client.Enemies
                 }
                 catch
                 {
-                    // Some enemies throw if Kill runs with behaviour disabled — still hide below
+                    // Some enemies throw if Kill runs with behaviour disabled
                 }
             }
             else
@@ -156,8 +171,44 @@ namespace Blasphemous.Multiplayer.Client.Enemies
                 Enemy.CurrentLife = 0f;
             }
 
-            DisableCombatAndVisuals(hideSprite: true);
+            // Keep animator on so the death clip can play
+            if (Enemy.Animator != null)
+                Enemy.Animator.enabled = true;
+
             return true;
+        }
+
+        /// <summary>Called from EnemyManager.Update when HideBodyAt elapses.</summary>
+        public void TickDeferredHide()
+        {
+            if (!VisuallyDead || BodyHidden)
+                return;
+            if (HideBodyAt <= 0f || Time.time < HideBodyAt)
+                return;
+            HardHideBody();
+        }
+
+        public void HardHideBody()
+        {
+            if (Enemy == null)
+                return;
+
+            BodyHidden = true;
+            HideBodyAt = 0f;
+            DisableAllColliders();
+
+            if (Enemy.Animator != null)
+                Enemy.Animator.enabled = false;
+
+            if (Enemy.SpriteRenderer != null)
+                Enemy.SpriteRenderer.enabled = false;
+
+            var renderers = Enemy.GetComponentsInChildren<SpriteRenderer>(true);
+            for (int i = 0; i < renderers.Length; i++)
+                renderers[i].enabled = false;
+
+            if (Enemy.gameObject != null && Enemy.gameObject.activeSelf)
+                Enemy.gameObject.SetActive(false);
         }
 
         private void ApplyPuppetState(bool puppet)
@@ -181,36 +232,53 @@ namespace Blasphemous.Multiplayer.Client.Enemies
                 }
             }
 
-            // Keep animator running on living puppets so attack clips can play
-            if (Enemy.Animator != null && !VisuallyDead)
+            // Living puppets keep animator so attack/death clips can play
+            if (Enemy.Animator != null && !BodyHidden)
                 Enemy.Animator.enabled = true;
 
-            if (puppet || VisuallyDead)
-                DisableCombatColliders();
+            // Living puppets: keep DamageArea receive colliders so the friend can hit them.
+            // Only strip outbound attack volumes. Dead bodies strip everything on hard-hide.
+            if (puppet && !VisuallyDead)
+                DisableOutboundAttackColliders();
         }
 
-        private void DisableCombatAndVisuals(bool hideSprite)
+        /// <summary>
+        /// Disable contact/attack outbound colliders but leave DamageArea hurtboxes alone
+        /// so local player weapons can still land and be intercepted to the host.
+        /// </summary>
+        private void DisableOutboundAttackColliders()
         {
-            DisableCombatColliders();
-
-            if (!hideSprite || Enemy == null)
+            if (Enemy == null)
                 return;
 
-            if (Enemy.Animator != null)
-                Enemy.Animator.enabled = false;
+            var colliders = Enemy.GetComponentsInChildren<Collider2D>(true);
+            for (int i = 0; i < colliders.Length; i++)
+            {
+                Collider2D col = colliders[i];
+                if (col == null)
+                    continue;
 
-            if (Enemy.SpriteRenderer != null)
-                Enemy.SpriteRenderer.enabled = false;
+                // Keep receive hurtboxes (DamageArea owns these)
+                if (col.GetComponentInParent<DamageArea>() != null)
+                    continue;
 
-            var renderers = Enemy.GetComponentsInChildren<SpriteRenderer>(true);
-            for (int i = 0; i < renderers.Length; i++)
-                renderers[i].enabled = false;
+                // ContactDamage is outbound touch damage from the enemy
+                if (col.GetComponentInParent<ContactDamage>() != null)
+                {
+                    col.enabled = false;
+                    continue;
+                }
 
-            if (Enemy.gameObject != null && Enemy.gameObject.activeSelf)
-                Enemy.gameObject.SetActive(false);
+                // AttackArea / weapon volumes
+                if (col.GetComponentInParent<AttackArea>() != null)
+                {
+                    col.enabled = false;
+                    continue;
+                }
+            }
         }
 
-        private void DisableCombatColliders()
+        private void DisableAllColliders()
         {
             if (Enemy == null)
                 return;
