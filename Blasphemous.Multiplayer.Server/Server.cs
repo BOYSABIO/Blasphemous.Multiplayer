@@ -110,6 +110,10 @@ public class Server
                 case NetworkType.Attack:        receivePlayerAttack(e.ip, data); break;
                 case NetworkType.Effect:        receivePlayerEffect(e.ip, data); break;
                 case NetworkType.Ping:          ReceivePing(e.ip, data); break;
+                case NetworkType.EnemySnapshot: ReceiveEnemyRelay(e.ip, data, NetworkType.EnemySnapshot); break;
+                case NetworkType.EnemyState:    ReceiveEnemyRelay(e.ip, data, NetworkType.EnemyState); break;
+                case NetworkType.EnemyDamage:   ReceiveEnemyRelay(e.ip, data, NetworkType.EnemyDamage); break;
+                case NetworkType.EnemyDeath:    ReceiveEnemyRelay(e.ip, data, NetworkType.EnemyDeath); break;
                 default:
                     Logger.Error($"Data type '{type}' is not valid"); break;
             }
@@ -718,5 +722,26 @@ public class Server
         SendPing(playerIp, time);
     }
 
-    private const byte PROTOCOL_VERSION = 3;
+    // Enemy sync — scene-scoped relay (same interest filter as Position/Attack)
+
+    private void ReceiveEnemyRelay(string playerIp, byte[] data, NetworkType type)
+    {
+        PlayerInfo current = getCurrentPlayer(playerIp);
+        byte[] packet = GetNamedPacket(current, data);
+
+        foreach (string ip in connectedPlayers.Keys)
+        {
+            if (playerIp != ip && current.isInSameScene(connectedPlayers[ip]))
+                Send(ip, packet, type);
+        }
+    }
+
+    private byte[] GetNamedPacket(PlayerInfo player, byte[] body)
+    {
+        List<byte> bytes = addPlayerNameToData(player.name);
+        bytes.AddRange(body);
+        return bytes.ToArray();
+    }
+
+    private const byte PROTOCOL_VERSION = 4;
 }

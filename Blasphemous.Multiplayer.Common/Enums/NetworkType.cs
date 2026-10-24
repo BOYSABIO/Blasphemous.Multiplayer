@@ -1,5 +1,4 @@
-﻿
-namespace Blasphemous.Multiplayer.Common.Enums;
+﻿namespace Blasphemous.Multiplayer.Common.Enums;
 
 public enum NetworkType
 {
@@ -16,4 +15,16 @@ public enum NetworkType
     Attack = 10,
     Effect = 11,
     Ping = 12,
+
+    /// <summary>Full enemy state (join catch-up / first register).</summary>
+    EnemySnapshot = 13,
+
+    /// <summary>Delta enemy position + HP.</summary>
+    EnemyState = 14,
+
+    /// <summary>Client reports damage; only scene host applies it.</summary>
+    EnemyDamage = 15,
+
+    /// <summary>Host announces an enemy death.</summary>
+    EnemyDeath = 16,
 }

@@ -1,4 +1,5 @@
 ﻿using Blasphemous.ModdingAPI;
+using Blasphemous.Multiplayer.Client.Enemies;
 using Blasphemous.Multiplayer.Client.Players;
 using Blasphemous.Multiplayer.Client.ProgressSync;
 using Blasphemous.Multiplayer.Client.PvP.Models;
@@ -150,6 +151,10 @@ namespace Blasphemous.Multiplayer.Client.Network
                         case NetworkType.Attack: ReceiveAttack(messageData); break;
                         case NetworkType.Effect: ReceiveEffect(messageData); break;
                         case NetworkType.Ping: ReceivePing(messageData); break;
+                        case NetworkType.EnemySnapshot: ReceiveEnemySnapshot(messageData); break;
+                        case NetworkType.EnemyState: ReceiveEnemyState(messageData); break;
+                        case NetworkType.EnemyDamage: ReceiveEnemyDamage(messageData); break;
+                        case NetworkType.EnemyDeath: ReceiveEnemyDeath(messageData); break;
                     }
                     startIdx += 3 + length;
                 }
@@ -477,10 +482,103 @@ namespace Blasphemous.Multiplayer.Client.Network
             Main.Multiplayer.PingManager.ReceivePing(time);
         }
 
+        // Enemy sync — payloads are name-prefixed by the server (same as Position/Attack)
+
+        public void SendEnemySnapshot(int netId, string enemyTypeId, Vector2 position, float life, bool alive, bool facingRight)
+        {
+            QueueMesssage(BuildEnemyBody(netId, enemyTypeId, position, life, alive, facingRight, includeTypeId: true), NetworkType.EnemySnapshot);
+        }
+
+        private void ReceiveEnemySnapshot(byte[] data)
+        {
+            int idx = ExtractNameFromData(data, out _);
+            ReadEnemyBody(data, idx, includeTypeId: true, out int netId, out string enemyTypeId, out Vector2 position, out float life, out bool alive, out bool facingRight);
+            Main.Multiplayer.EnemyManager.ReceiveSnapshot(netId, enemyTypeId, position, life, alive, facingRight);
+        }
+
+        public void SendEnemyState(int netId, Vector2 position, float life, bool alive, bool facingRight)
+        {
+            QueueMesssage(BuildEnemyBody(netId, null, position, life, alive, facingRight, includeTypeId: false), NetworkType.EnemyState);
+        }
+
+        private void ReceiveEnemyState(byte[] data)
+        {
+            int idx = ExtractNameFromData(data, out _);
+            ReadEnemyBody(data, idx, includeTypeId: false, out int netId, out _, out Vector2 position, out float life, out bool alive, out bool facingRight);
+            Main.Multiplayer.EnemyManager.ReceiveState(netId, position, life, alive, facingRight);
+        }
+
+        public void SendEnemyDamage(int netId, float amount)
+        {
+            List<byte> bytes = new();
+            bytes.AddRange(BitConverter.GetBytes(netId));
+            bytes.AddRange(BitConverter.GetBytes(amount));
+            QueueMesssage(bytes.ToArray(), NetworkType.EnemyDamage);
+        }
+
+        private void ReceiveEnemyDamage(byte[] data)
+        {
+            int startIdx = ExtractNameFromData(data, out string attackerName);
+            int netId = BitConverter.ToInt32(data, startIdx);
+            float amount = BitConverter.ToSingle(data, startIdx + 4);
+            Main.Multiplayer.EnemyManager.ReceiveDamage(netId, amount, attackerName);
+        }
+
+        public void SendEnemyDeath(int netId)
+        {
+            QueueMesssage(BitConverter.GetBytes(netId), NetworkType.EnemyDeath);
+        }
+
+        private void ReceiveEnemyDeath(byte[] data)
+        {
+            int startIdx = ExtractNameFromData(data, out _);
+            int netId = BitConverter.ToInt32(data, startIdx);
+            Main.Multiplayer.EnemyManager.ReceiveDeath(netId);
+        }
+
+        private static byte[] BuildEnemyBody(int netId, string enemyTypeId, Vector2 position, float life, bool alive, bool facingRight, bool includeTypeId)
+        {
+            EnemySyncFlags flags = EnemySyncFlags.None;
+            if (alive) flags |= EnemySyncFlags.Alive;
+            if (facingRight) flags |= EnemySyncFlags.FacingRight;
+
+            List<byte> bytes = new();
+            bytes.AddRange(BitConverter.GetBytes(netId));
+            bytes.Add((byte)flags);
+            bytes.AddRange(BitConverter.GetBytes(position.x));
+            bytes.AddRange(BitConverter.GetBytes(position.y));
+            bytes.AddRange(BitConverter.GetBytes(life));
+
+            if (includeTypeId)
+            {
+                byte[] idBytes = Encoding.UTF8.GetBytes(enemyTypeId ?? string.Empty);
+                bytes.Add((byte)idBytes.Length);
+                bytes.AddRange(idBytes);
+            }
+
+            return bytes.ToArray();
+        }
+
+        private static void ReadEnemyBody(byte[] data, int idx, bool includeTypeId, out int netId, out string enemyTypeId, out Vector2 position, out float life, out bool alive, out bool facingRight)
+        {
+            netId = BitConverter.ToInt32(data, idx);
+            EnemySyncFlags flags = (EnemySyncFlags)data[idx + 4];
+            alive = (flags & EnemySyncFlags.Alive) != 0;
+            facingRight = (flags & EnemySyncFlags.FacingRight) != 0;
+            position = new Vector2(BitConverter.ToSingle(data, idx + 5), BitConverter.ToSingle(data, idx + 9));
+            life = BitConverter.ToSingle(data, idx + 13);
+            enemyTypeId = string.Empty;
+            if (includeTypeId)
+            {
+                byte typeLen = data[idx + 17];
+                enemyTypeId = Encoding.UTF8.GetString(data, idx + 18, typeLen);
+            }
+        }
+
         // Maybe replace name with entire ConnectInfo
         public delegate void ConnectDelegate(bool success, RefusalType refusal);
         public event ConnectDelegate OnConnect;
 
-        private const byte PROTOCOL_VERSION = 3;
+        private const byte PROTOCOL_VERSION = 4;
     }
 }

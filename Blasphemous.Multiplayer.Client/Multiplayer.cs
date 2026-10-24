@@ -3,6 +3,7 @@ using Blasphemous.ModdingAPI;
 using Blasphemous.ModdingAPI.Helpers;
 using Blasphemous.ModdingAPI.Persistence;
 using Blasphemous.Multiplayer.Client.Data;
+using Blasphemous.Multiplayer.Client.Enemies;
 using Blasphemous.Multiplayer.Client.Map;
 using Blasphemous.Multiplayer.Client.Network;
 using Blasphemous.Multiplayer.Client.Notifications;
@@ -26,6 +27,7 @@ public class Multiplayer : BlasMod, ISlotPersistentMod<MultiplayerSlotData>, IGl
 
     // Managers
     public AttackManager AttackManager { get; private set; }
+    public EnemyManager EnemyManager { get; private set; }
     public MainPlayerManager MainPlayerManager { get; private set; }
     public Map.MapManager MapManager { get; private set; }
     public NetworkManager NetworkManager { get; private set; }
@@ -60,6 +62,7 @@ public class Multiplayer : BlasMod, ISlotPersistentMod<MultiplayerSlotData>, IGl
 
         // Create managers
         AttackManager = new AttackManager();
+        EnemyManager = new EnemyManager();
         MainPlayerManager = new MainPlayerManager();
         MapManager = new Map.MapManager();
         NetworkManager = new NetworkManager();
@@ -94,6 +97,7 @@ public class Multiplayer : BlasMod, ISlotPersistentMod<MultiplayerSlotData>, IGl
         ProgressManager.ResetProgressSentStatus();
         OtherPlayerManager.RemoveAllConnectedPlayers();
         OtherPlayerManager.RemoveAllActivePlayers();
+        EnemyManager.OnDisconnect();
         PlayerName = string.Empty;
     }
 
@@ -114,6 +118,11 @@ public class Multiplayer : BlasMod, ISlotPersistentMod<MultiplayerSlotData>, IGl
             MainPlayerManager.SendAllLocationData();
             NetworkManager.SendEnterScene(newLevel);
             ProgressManager.SendAllProgress();
+            EnemyManager.LevelLoaded(newLevel);
+        }
+        else
+        {
+            EnemyManager.LevelUnloaded();
         }
 
         if (newLevel == "D06Z01S01")
@@ -129,6 +138,7 @@ public class Multiplayer : BlasMod, ISlotPersistentMod<MultiplayerSlotData>, IGl
             NetworkManager.SendLeaveScene();
         }
 
+        EnemyManager.LevelUnloaded();
         CurrentlyInLevel = false;
     }
 
@@ -144,6 +154,7 @@ public class Multiplayer : BlasMod, ISlotPersistentMod<MultiplayerSlotData>, IGl
             MainPlayerManager.Update();
             OtherPlayerManager.Update();
             ProgressManager.Update();
+            EnemyManager.Update();
         }
 
         NetworkManager.SendQueue();
@@ -195,6 +206,7 @@ public class Multiplayer : BlasMod, ISlotPersistentMod<MultiplayerSlotData>, IGl
             NetworkManager.SendEnterScene(Core.LevelManager.currentLevel.LevelName);
             OtherPlayerManager.AddNametag(PlayerName, true);
             ProgressManager.SendAllProgress();
+            EnemyManager.LevelLoaded(Core.LevelManager.currentLevel.LevelName);
         }
 
         NotificationManager.DisplayNotification(LocalizationHandler.Localize("con"));

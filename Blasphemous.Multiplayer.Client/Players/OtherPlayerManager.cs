@@ -359,7 +359,12 @@ namespace Blasphemous.Multiplayer.Client.Players
 
             player.CurrentScene = scene;
             if (Core.LevelManager.currentLevel.LevelName == scene)
+            {
                 AddActivePlayer(playerName);
+                Main.Multiplayer.EnemyManager.OnPlayersInSceneChanged();
+                if (Main.Multiplayer.EnemyManager.IsSceneHost)
+                    Main.Multiplayer.EnemyManager.SendAllSnapshots();
+            }
 
             Main.Multiplayer.MapManager.QueueMapUpdate();
         }
@@ -370,7 +375,10 @@ namespace Blasphemous.Multiplayer.Client.Players
             if (player == null) return;
 
             if (Core.LevelManager.currentLevel.LevelName == player.CurrentScene)
+            {
                 RemoveActivePlayer(playerName);
+                Main.Multiplayer.EnemyManager.OnPlayersInSceneChanged();
+            }
             player.CurrentScene = string.Empty;
 
             Main.Multiplayer.MapManager.QueueMapUpdate();

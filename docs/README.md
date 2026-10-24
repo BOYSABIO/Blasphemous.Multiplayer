@@ -29,7 +29,10 @@
 - Church donation amount
 
 ### Things that will probably never sync
-- Enemies & bosses (This is a huge task and not really feasible)
+- Bosses (phases, arenas, and cutscenes — still out of scope)
+
+### Experimental (this fork)
+- **Room enemies** — host-authoritative position / HP / death in the same scene (protocol v4). Bosses are still excluded.
 
 ## PvP
 PvP is now available in Blasphemous Multiplayer, but only for sword attacks right now (Prayers other than Debla do nothing).  To fight other players, make sure you are on a different team than them or enable friendly fire
