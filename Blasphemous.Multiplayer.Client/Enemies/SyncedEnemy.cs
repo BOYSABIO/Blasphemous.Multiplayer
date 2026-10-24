@@ -21,6 +21,7 @@ namespace Blasphemous.Multiplayer.Client.Enemies
         public int LastSentAnimHash { get; set; }
 
         public bool IsPuppet { get; private set; }
+        public bool VisuallyDead { get; private set; }
 
         public SyncedEnemy(int netId, string enemyTypeId, Enemy enemy)
         {
@@ -32,6 +33,7 @@ namespace Blasphemous.Multiplayer.Client.Enemies
         public void Bind(Enemy enemy)
         {
             Enemy = enemy;
+            VisuallyDead = false;
             if (enemy == null)
                 return;
 
@@ -51,6 +53,8 @@ namespace Blasphemous.Multiplayer.Client.Enemies
 
         public void ApplyAnimHash(int animHash)
         {
+            if (VisuallyDead || LastSentAlive == false)
+                return;
             if (animHash == 0 || Enemy == null || Enemy.Animator == null)
                 return;
             if (Enemy.Animator.GetCurrentAnimatorStateInfo(0).shortNameHash == animHash)
@@ -60,6 +64,15 @@ namespace Blasphemous.Multiplayer.Client.Enemies
 
         public void SetPuppet(bool puppet)
         {
+            // Dead enemies must never regain AI
+            if (VisuallyDead || (Enemy != null && Enemy.Dead) || LastSentAlive == false)
+            {
+                IsPuppet = true;
+                ApplyPuppetState(true);
+                DisableCombatAndVisuals(hideSprite: VisuallyDead);
+                return;
+            }
+
             if (IsPuppet == puppet && Enemy != null)
             {
                 ApplyPuppetState(puppet);
@@ -70,26 +83,95 @@ namespace Blasphemous.Multiplayer.Client.Enemies
             ApplyPuppetState(puppet);
         }
 
+        /// <summary>
+        /// Hard death for sync: kill pipeline + strip combat + hide body so both clients agree.
+        /// </summary>
+        public void ForceVisualDeath()
+        {
+            if (Enemy == null)
+                return;
+
+            VisuallyDead = true;
+            LastSentAlive = false;
+            LastSentLife = 0f;
+            IsPuppet = true;
+
+            ApplyPuppetState(true);
+
+            if (!Enemy.Dead)
+            {
+                try
+                {
+                    Enemy.CurrentLife = 0f;
+                    Enemy.Kill();
+                }
+                catch
+                {
+                    // Some enemies throw if Kill runs with behaviour disabled — still hide below
+                }
+            }
+            else
+            {
+                Enemy.CurrentLife = 0f;
+            }
+
+            DisableCombatAndVisuals(hideSprite: true);
+        }
+
         private void ApplyPuppetState(bool puppet)
         {
             if (Enemy == null)
                 return;
 
             var behaviour = Enemy.EnemyBehaviour;
-            if (behaviour == null)
+            if (behaviour != null)
+            {
+                if (puppet)
+                {
+                    behaviour.StopBehaviour();
+                    behaviour.StopMovement();
+                    behaviour.enabled = false;
+                }
+                else if (!VisuallyDead && !Enemy.Dead)
+                {
+                    behaviour.enabled = true;
+                    behaviour.StartBehaviour();
+                }
+            }
+
+            if (puppet || VisuallyDead)
+                DisableCombatColliders();
+        }
+
+        private void DisableCombatAndVisuals(bool hideSprite)
+        {
+            DisableCombatColliders();
+
+            if (!hideSprite || Enemy == null)
                 return;
 
-            if (puppet)
+            if (Enemy.SpriteRenderer != null)
+                Enemy.SpriteRenderer.enabled = false;
+
+            // Also hide any child sprite renderers (shadows / extra limbs)
+            var renderers = Enemy.GetComponentsInChildren<SpriteRenderer>(true);
+            for (int i = 0; i < renderers.Length; i++)
+                renderers[i].enabled = false;
+
+            if (Enemy.gameObject != null && Enemy.gameObject.activeSelf)
+                Enemy.gameObject.SetActive(false);
+        }
+
+        private void DisableCombatColliders()
+        {
+            if (Enemy == null)
+                return;
+
+            var colliders = Enemy.GetComponentsInChildren<Collider2D>(true);
+            for (int i = 0; i < colliders.Length; i++)
             {
-                // Freeze AI/movement — animator stays so we can mirror host attack states
-                behaviour.StopBehaviour();
-                behaviour.StopMovement();
-                behaviour.enabled = false;
-            }
-            else
-            {
-                behaviour.enabled = true;
-                behaviour.StartBehaviour();
+                if (colliders[i] != null)
+                    colliders[i].enabled = false;
             }
         }
 

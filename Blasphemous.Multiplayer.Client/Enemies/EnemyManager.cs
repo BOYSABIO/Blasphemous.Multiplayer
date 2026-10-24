@@ -413,7 +413,7 @@ namespace Blasphemous.Multiplayer.Client.Enemies
 
         public void ReceiveSnapshot(string senderName, int netId, string enemyTypeId, Vector2 position, float life, bool alive, bool facingRight, int animHash)
         {
-            YieldHostIfPeerIsBroadcasting(senderName);
+            // Sticky host: ignore peer authority traffic; do not yield mid-room
             if (_isSceneHost)
                 return;
 
@@ -440,7 +440,6 @@ namespace Blasphemous.Multiplayer.Client.Enemies
 
         public void ReceiveState(string senderName, int netId, Vector2 position, float life, bool alive, bool facingRight, int animHash)
         {
-            YieldHostIfPeerIsBroadcasting(senderName);
             if (_isSceneHost)
                 return;
 
@@ -485,7 +484,6 @@ namespace Blasphemous.Multiplayer.Client.Enemies
 
         public void ReceiveDeath(string senderName, int netId, Vector2 deathPos, string enemyTypeId)
         {
-            YieldHostIfPeerIsBroadcasting(senderName);
             if (_isSceneHost)
                 return;
 
@@ -526,22 +524,17 @@ namespace Blasphemous.Multiplayer.Client.Enemies
             if (synced == null || !synced.IsValid)
                 return;
 
-            synced.SetPuppet(true);
-            if (!synced.Enemy.Dead)
+            _applyingRemoteDamage = true;
+            try
             {
-                _applyingRemoteDamage = true;
-                try
-                {
-                    synced.Enemy.CurrentLife = 0f;
-                    synced.Enemy.Kill();
-                }
-                finally
-                {
-                    _applyingRemoteDamage = false;
-                }
+                synced.ForceVisualDeath();
             }
-            synced.LastSentAlive = false;
-            ModLog.Info($"[EnemySync] Applied death {synced.NetId} ({synced.EnemyTypeId})");
+            finally
+            {
+                _applyingRemoteDamage = false;
+            }
+
+            ModLog.Info($"[EnemySync] Applied death {synced.NetId} ({synced.EnemyTypeId}) visual={synced.VisuallyDead}");
         }
 
         private void ApplyPendingDeaths()
@@ -670,20 +663,6 @@ namespace Blasphemous.Multiplayer.Client.Enemies
             Main.Multiplayer.NetworkManager.SendEnemySyncRequest();
         }
 
-        private void YieldHostIfPeerIsBroadcasting(string senderName)
-        {
-            if (!_isSceneHost || string.IsNullOrEmpty(senderName))
-                return;
-            if (senderName == Main.Multiplayer.PlayerName)
-                return;
-
-            ModLog.Info($"[EnemySync] Yielding host to {senderName}");
-            _sceneHostName = senderName;
-            _isSceneHost = false;
-            ApplyAuthorityToAll();
-            SuppressUntrackedEnemyAi();
-        }
-
         private void BroadcastEnemyAfterHit(SyncedEnemy synced)
         {
             Vector2 pos = synced.Enemy.transform.position;
@@ -702,6 +681,10 @@ namespace Blasphemous.Multiplayer.Client.Enemies
                 Main.Multiplayer.NetworkManager.SendEnemyState(synced.NetId, pos, life, true, facingRight, synced.ReadAnimHash());
         }
 
+        /// <summary>
+        /// Sticky scene host: first occupant claims; joiners always follow while anyone else is present.
+        /// Host is never stolen mid-room by peer enemy packets.
+        /// </summary>
         private void ClaimOrFollowExistingHost()
         {
             string local = Main.Multiplayer.PlayerName ?? string.Empty;
@@ -710,14 +693,18 @@ namespace Blasphemous.Multiplayer.Client.Enemies
 
             if (othersPresent)
             {
+                // Joiner: never claim. Prefer lex-first other as the expected sticky host name
+                // until roster recalc confirms (existing host keeps themselves via Recalculate).
                 string other = present.Where(p => p != local).OrderBy(p => p, StringComparer.Ordinal).First();
                 _sceneHostName = other;
                 _isSceneHost = false;
+                ModLog.Info($"[EnemySync] Joiner following host={_sceneHostName}");
             }
             else
             {
                 _sceneHostName = local;
                 _isSceneHost = true;
+                ModLog.Info($"[EnemySync] Claiming sticky host ({local})");
             }
         }
 
@@ -726,14 +713,18 @@ namespace Blasphemous.Multiplayer.Client.Enemies
             string local = Main.Multiplayer.PlayerName ?? string.Empty;
             var present = GetPlayersInScene();
 
+            // Sticky: keep current host for as long as they remain in the scene
             if (!string.IsNullOrEmpty(_sceneHostName) && present.Contains(_sceneHostName))
             {
                 _isSceneHost = _sceneHostName == local;
                 return;
             }
 
+            // Host left — re-elect once among remaining players
+            string previous = _sceneHostName;
             _sceneHostName = present.OrderBy(p => p, StringComparer.Ordinal).FirstOrDefault() ?? local;
             _isSceneHost = _sceneHostName == local;
+            ModLog.Info($"[EnemySync] Host left ({previous}) → re-elect {_sceneHostName} (localHost={_isSceneHost})");
         }
 
         private List<string> GetPlayersInScene()
@@ -760,6 +751,17 @@ namespace Blasphemous.Multiplayer.Client.Enemies
             {
                 if (!synced.IsValid)
                     continue;
+
+                // Never revive dead enemies when reclaiming host
+                if (synced.VisuallyDead || synced.LastSentAlive == false || synced.Enemy.Dead)
+                {
+                    if (!_isSceneHost || synced.VisuallyDead)
+                        ForceKill(synced); // non-host / already hard-killed: hide body
+                    else
+                        synced.SetPuppet(true); // host natural corpse: AI off, keep death anim
+                    continue;
+                }
+
                 synced.SetPuppet(!_isSceneHost);
             }
         }
@@ -1008,20 +1010,24 @@ namespace Blasphemous.Multiplayer.Client.Enemies
             if (!synced.IsValid)
                 return;
 
+            // life<=0 must count as dead even if the alive flag is wrong
+            bool shouldBeDead = !alive || life <= 0.01f || synced.VisuallyDead;
+            if (shouldBeDead)
+            {
+                ForceKill(synced);
+                return;
+            }
+
             synced.SetPuppet(true);
-            synced.Enemy.transform.position = new Vector3(position.x, position.y, synced.Enemy.transform.position.z);
+
+            if (synced.Enemy.gameObject.activeSelf)
+                synced.Enemy.transform.position = new Vector3(position.x, position.y, synced.Enemy.transform.position.z);
 
             if (synced.Enemy.Status != null)
                 synced.Enemy.Status.Orientation = facingRight ? EntityOrientation.Right : EntityOrientation.Left;
 
             if (synced.Enemy.SpriteRenderer != null)
                 synced.Enemy.SpriteRenderer.flipX = !facingRight;
-
-            if (!alive)
-            {
-                ForceKill(synced);
-                return;
-            }
 
             if (Mathf.Abs(synced.Enemy.CurrentLife - life) > 0.1f)
                 synced.Enemy.CurrentLife = life;
