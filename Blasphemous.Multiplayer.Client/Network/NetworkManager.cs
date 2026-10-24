@@ -155,6 +155,7 @@ namespace Blasphemous.Multiplayer.Client.Network
                         case NetworkType.EnemyState: ReceiveEnemyState(messageData); break;
                         case NetworkType.EnemyDamage: ReceiveEnemyDamage(messageData); break;
                         case NetworkType.EnemyDeath: ReceiveEnemyDeath(messageData); break;
+                        case NetworkType.EnemySyncRequest: ReceiveEnemySyncRequest(messageData); break;
                     }
                     startIdx += 3 + length;
                 }
@@ -491,9 +492,9 @@ namespace Blasphemous.Multiplayer.Client.Network
 
         private void ReceiveEnemySnapshot(byte[] data)
         {
-            int idx = ExtractNameFromData(data, out _);
+            int idx = ExtractNameFromData(data, out string sender);
             ReadEnemyBody(data, idx, includeTypeId: true, out int netId, out string enemyTypeId, out Vector2 position, out float life, out bool alive, out bool facingRight);
-            Main.Multiplayer.EnemyManager.ReceiveSnapshot(netId, enemyTypeId, position, life, alive, facingRight);
+            Main.Multiplayer.EnemyManager.ReceiveSnapshot(sender, netId, enemyTypeId, position, life, alive, facingRight);
         }
 
         public void SendEnemyState(int netId, Vector2 position, float life, bool alive, bool facingRight)
@@ -503,9 +504,9 @@ namespace Blasphemous.Multiplayer.Client.Network
 
         private void ReceiveEnemyState(byte[] data)
         {
-            int idx = ExtractNameFromData(data, out _);
+            int idx = ExtractNameFromData(data, out string sender);
             ReadEnemyBody(data, idx, includeTypeId: false, out int netId, out _, out Vector2 position, out float life, out bool alive, out bool facingRight);
-            Main.Multiplayer.EnemyManager.ReceiveState(netId, position, life, alive, facingRight);
+            Main.Multiplayer.EnemyManager.ReceiveState(sender, netId, position, life, alive, facingRight);
         }
 
         public void SendEnemyDamage(int netId, float amount)
@@ -531,9 +532,20 @@ namespace Blasphemous.Multiplayer.Client.Network
 
         private void ReceiveEnemyDeath(byte[] data)
         {
-            int startIdx = ExtractNameFromData(data, out _);
+            int startIdx = ExtractNameFromData(data, out string sender);
             int netId = BitConverter.ToInt32(data, startIdx);
-            Main.Multiplayer.EnemyManager.ReceiveDeath(netId);
+            Main.Multiplayer.EnemyManager.ReceiveDeath(sender, netId);
+        }
+
+        public void SendEnemySyncRequest()
+        {
+            QueueMesssage(new byte[] { 0 }, NetworkType.EnemySyncRequest);
+        }
+
+        private void ReceiveEnemySyncRequest(byte[] data)
+        {
+            int startIdx = ExtractNameFromData(data, out string requester);
+            Main.Multiplayer.EnemyManager.ReceiveSyncRequest(requester);
         }
 
         private static byte[] BuildEnemyBody(int netId, string enemyTypeId, Vector2 position, float life, bool alive, bool facingRight, bool includeTypeId)
@@ -579,6 +591,6 @@ namespace Blasphemous.Multiplayer.Client.Network
         public delegate void ConnectDelegate(bool success, RefusalType refusal);
         public event ConnectDelegate OnConnect;
 
-        private const byte PROTOCOL_VERSION = 4;
+        private const byte PROTOCOL_VERSION = 5;
     }
 }

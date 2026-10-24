@@ -114,6 +114,7 @@ public class Server
                 case NetworkType.EnemyState:    ReceiveEnemyRelay(e.ip, data, NetworkType.EnemyState); break;
                 case NetworkType.EnemyDamage:   ReceiveEnemyRelay(e.ip, data, NetworkType.EnemyDamage); break;
                 case NetworkType.EnemyDeath:    ReceiveEnemyRelay(e.ip, data, NetworkType.EnemyDeath); break;
+                case NetworkType.EnemySyncRequest: ReceiveEnemyRelay(e.ip, data, NetworkType.EnemySyncRequest); break;
                 default:
                     Logger.Error($"Data type '{type}' is not valid"); break;
             }
@@ -743,5 +744,5 @@ public class Server
         return bytes.ToArray();
     }
 
-    private const byte PROTOCOL_VERSION = 4;
+    private const byte PROTOCOL_VERSION = 5;
 }

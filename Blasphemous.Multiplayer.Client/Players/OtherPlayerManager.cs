@@ -362,8 +362,6 @@ namespace Blasphemous.Multiplayer.Client.Players
             {
                 AddActivePlayer(playerName);
                 Main.Multiplayer.EnemyManager.OnPlayersInSceneChanged();
-                if (Main.Multiplayer.EnemyManager.IsSceneHost)
-                    Main.Multiplayer.EnemyManager.SendAllSnapshots();
             }
 
             Main.Multiplayer.MapManager.QueueMapUpdate();

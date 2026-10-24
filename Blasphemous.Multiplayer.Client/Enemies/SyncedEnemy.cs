@@ -24,24 +24,36 @@ namespace Blasphemous.Multiplayer.Client.Enemies
         {
             NetId = netId;
             EnemyTypeId = enemyTypeId ?? string.Empty;
-            Enemy = enemy;
-            if (enemy != null)
-            {
-                LastSentPosition = enemy.transform.position;
-                LastSentLife = enemy.CurrentLife;
-                LastSentAlive = !enemy.Dead;
-                LastSentFacingRight = enemy.Status == null || enemy.Status.Orientation == EntityOrientation.Right;
-            }
+            Bind(enemy);
         }
 
         public void Bind(Enemy enemy)
         {
             Enemy = enemy;
+            if (enemy == null)
+                return;
+
+            LastSentPosition = enemy.transform.position;
+            LastSentLife = enemy.CurrentLife;
+            LastSentAlive = !enemy.Dead;
+            LastSentFacingRight = enemy.Status == null || enemy.Status.Orientation == EntityOrientation.Right;
         }
 
         public void SetPuppet(bool puppet)
         {
+            if (IsPuppet == puppet && Enemy != null)
+            {
+                // Still re-assert in case behaviour was re-enabled by the game
+                ApplyPuppetState(puppet);
+                return;
+            }
+
             IsPuppet = puppet;
+            ApplyPuppetState(puppet);
+        }
+
+        private void ApplyPuppetState(bool puppet)
+        {
             if (Enemy == null)
                 return;
 

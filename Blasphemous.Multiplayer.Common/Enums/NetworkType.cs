@@ -27,4 +27,7 @@ public enum NetworkType
 
     /// <summary>Host announces an enemy death.</summary>
     EnemyDeath = 16,
+
+    /// <summary>Non-host asks the scene host to resend all snapshots.</summary>
+    EnemySyncRequest = 17,
 }
