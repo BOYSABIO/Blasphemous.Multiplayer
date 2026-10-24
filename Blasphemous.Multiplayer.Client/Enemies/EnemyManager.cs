@@ -1,5 +1,7 @@
 using Blasphemous.ModdingAPI;
+using Blasphemous.Multiplayer.Client.Players;
 using Framework.FrameworkCore;
+using Framework.Managers;
 using Gameplay.GameControllers.Entities;
 using System;
 using System.Collections.Generic;
@@ -20,10 +22,16 @@ namespace Blasphemous.Multiplayer.Client.Enemies
         private readonly Dictionary<int, SyncedEnemy> _enemies = new();
         /// <summary>Deaths we could not apply yet (enemy not spawned / not bound). Retried on scan.</summary>
         private readonly Dictionary<int, PendingDeath> _pendingDeaths = new();
+        /// <summary>Per-player cooldown so one enemy swing doesn't multi-hit the remote avatar.</summary>
+        private readonly Dictionary<string, float> _remoteHitCooldown = new();
         private readonly float _positionCutoff = 0.04f;
         private readonly float _lifeCutoff = 0.25f;
         private readonly float _scanInterval = 0.25f;
-        private readonly float _snapshotInterval = 0.6f;
+        private readonly float _snapshotInterval = 0.5f;
+        private readonly float _retargetInterval = 0.15f;
+        private float _retargetTimer;
+        private readonly float _remoteHitCooldownSeconds = 0.45f;
+        private readonly float _aggroStickyBonus = 2.5f;
         private readonly float[] _deferredScanAt = { 0.25f, 0.75f, 1.5f, 3.0f };
         private int _deferredScanIndex;
         private float _levelAge;
@@ -139,8 +147,18 @@ namespace Blasphemous.Multiplayer.Client.Enemies
                 }
             }
 
+            TickRemoteHitCooldowns();
+
             if (!_isSceneHost)
                 return;
+
+            // One shared AI: retarget host enemies toward nearest of local + remote players
+            _retargetTimer -= Time.deltaTime;
+            if (_retargetTimer <= 0f)
+            {
+                _retargetTimer = _retargetInterval;
+                RetargetEnemiesToNearestPlayer();
+            }
 
             _snapshotTimer -= Time.deltaTime;
             if (_snapshotTimer <= 0f)
@@ -171,21 +189,160 @@ namespace Blasphemous.Multiplayer.Client.Enemies
                 Vector2 pos = synced.Enemy.transform.position;
                 float life = synced.Enemy.CurrentLife;
                 bool facingRight = IsFacingRight(synced.Enemy);
+                int animHash = synced.ReadAnimHash();
 
                 bool moved = Mathf.Abs(pos.x - synced.LastSentPosition.x) > _positionCutoff
                     || Mathf.Abs(pos.y - synced.LastSentPosition.y) > _positionCutoff;
                 bool lifeChanged = Mathf.Abs(life - synced.LastSentLife) > _lifeCutoff;
                 bool facingChanged = facingRight != synced.LastSentFacingRight;
+                bool animChanged = animHash != 0 && animHash != synced.LastSentAnimHash;
 
-                if (!moved && !lifeChanged && !facingChanged)
+                if (!moved && !lifeChanged && !facingChanged && !animChanged)
                     continue;
 
                 synced.LastSentPosition = pos;
                 synced.LastSentLife = life;
                 synced.LastSentAlive = true;
                 synced.LastSentFacingRight = facingRight;
-                Main.Multiplayer.NetworkManager.SendEnemyState(synced.NetId, pos, life, alive: true, facingRight);
+                synced.LastSentAnimHash = animHash;
+                Main.Multiplayer.NetworkManager.SendEnemyState(synced.NetId, pos, life, alive: true, facingRight, animHash);
             }
+        }
+
+        /// <summary>
+        /// Host: enemy contact hit the remote player's avatar — tell their client to take HP damage.
+        /// </summary>
+        public void NotifyRemotePlayerHitByEnemy(string playerName, float damageAmount)
+        {
+            if (!_isSceneHost || string.IsNullOrEmpty(playerName) || damageAmount <= 0f)
+                return;
+            if (playerName == Main.Multiplayer.PlayerName)
+                return;
+
+            if (_remoteHitCooldown.TryGetValue(playerName, out float left) && left > 0f)
+                return;
+
+            _remoteHitCooldown[playerName] = _remoteHitCooldownSeconds;
+            ModLog.Info($"[EnemySync] Enemy hit remote {playerName} for {damageAmount:0.#}");
+            Main.Multiplayer.NetworkManager.SendEnemyPlayerHit(playerName, damageAmount);
+        }
+
+        public void ReceiveEnemyPlayerHit(string senderName, string receiverName, float damageAmount)
+        {
+            if (receiverName != Main.Multiplayer.PlayerName)
+                return;
+            if (Core.Logic.Penitent == null || Core.Logic.Penitent.Dead)
+                return;
+            if (damageAmount <= 0f)
+                return;
+
+            GameObject attacker = FindNearestSyncedEnemyGameObject() ?? Core.Logic.Penitent.gameObject;
+            var hit = new Hit
+            {
+                AttackingEntity = attacker,
+                DamageAmount = damageAmount,
+                DamageElement = DamageArea.DamageElement.Normal,
+                DamageType = DamageArea.DamageType.Normal,
+                Force = 1f,
+                ThrowbackDirByOwnerPosition = true,
+                Unparriable = true,
+                Unblockable = true,
+                Unnavoidable = true,
+            };
+
+            ModLog.Info($"[EnemySync] Applying shared-enemy hit ({damageAmount:0.#}) from host {senderName}");
+            Core.Logic.Penitent.Damage(hit);
+        }
+
+        private void TickRemoteHitCooldowns()
+        {
+            if (_remoteHitCooldown.Count == 0)
+                return;
+            var keys = _remoteHitCooldown.Keys.ToList();
+            foreach (string key in keys)
+            {
+                float next = _remoteHitCooldown[key] - Time.deltaTime;
+                if (next <= 0f)
+                    _remoteHitCooldown.Remove(key);
+                else
+                    _remoteHitCooldown[key] = next;
+            }
+        }
+
+        private void RetargetEnemiesToNearestPlayer()
+        {
+            var candidates = CollectPlayerTargets();
+            if (candidates.Count == 0)
+                return;
+
+            foreach (var synced in UniqueEnemies())
+            {
+                if (!synced.IsValid || synced.Enemy.Dead || synced.IsPuppet)
+                    continue;
+
+                GameObject best = PickNearestTarget(synced.Enemy.transform.position, candidates, synced.Enemy.Target);
+                if (best != null && synced.Enemy.Target != best)
+                {
+                    synced.Enemy.Target = best;
+                }
+            }
+        }
+
+        private List<GameObject> CollectPlayerTargets()
+        {
+            var list = new List<GameObject>(4);
+            if (Core.Logic.Penitent != null && !Core.Logic.Penitent.Dead)
+                list.Add(Core.Logic.Penitent.gameObject);
+
+            foreach (OtherPlayerScript other in Main.Multiplayer.OtherPlayerManager.AllActivePlayers)
+            {
+                if (other == null || !other.gameObject.activeInHierarchy)
+                    continue;
+                list.Add(other.gameObject);
+            }
+            return list;
+        }
+
+        private GameObject PickNearestTarget(Vector2 from, List<GameObject> candidates, GameObject current)
+        {
+            GameObject best = null;
+            float bestDist = float.MaxValue;
+            foreach (GameObject go in candidates)
+            {
+                if (go == null)
+                    continue;
+                float d = Vector2.Distance(from, go.transform.position);
+                // Sticky aggro: prefer current target slightly so AI doesn't flicker
+                if (current != null && go == current)
+                    d -= _aggroStickyBonus;
+                if (d < bestDist)
+                {
+                    bestDist = d;
+                    best = go;
+                }
+            }
+            return best;
+        }
+
+        private GameObject FindNearestSyncedEnemyGameObject()
+        {
+            if (Core.Logic.Penitent == null)
+                return null;
+            Vector2 from = Core.Logic.Penitent.transform.position;
+            GameObject best = null;
+            float bestDist = float.MaxValue;
+            foreach (var synced in UniqueEnemies())
+            {
+                if (!synced.IsValid || synced.Enemy.Dead)
+                    continue;
+                float d = Vector2.Distance(from, synced.Enemy.transform.position);
+                if (d < bestDist)
+                {
+                    bestDist = d;
+                    best = synced.Enemy.gameObject;
+                }
+            }
+            return best;
         }
 
         public bool TryInterceptDamage(Enemy enemy, float amount)
@@ -206,7 +363,7 @@ namespace Blasphemous.Multiplayer.Client.Enemies
             return true;
         }
 
-        public void ReceiveSnapshot(string senderName, int netId, string enemyTypeId, Vector2 position, float life, bool alive, bool facingRight)
+        public void ReceiveSnapshot(string senderName, int netId, string enemyTypeId, Vector2 position, float life, bool alive, bool facingRight, int animHash)
         {
             YieldHostIfPeerIsBroadcasting(senderName);
             if (_isSceneHost)
@@ -228,12 +385,12 @@ namespace Blasphemous.Multiplayer.Client.Enemies
                 return;
             }
 
-            ApplyRemoteState(synced, position, life, alive, facingRight);
+            ApplyRemoteState(synced, position, life, alive, facingRight, animHash);
             if (!alive)
                 _pendingDeaths.Remove(netId);
         }
 
-        public void ReceiveState(string senderName, int netId, Vector2 position, float life, bool alive, bool facingRight)
+        public void ReceiveState(string senderName, int netId, Vector2 position, float life, bool alive, bool facingRight, int animHash)
         {
             YieldHostIfPeerIsBroadcasting(senderName);
             if (_isSceneHost)
@@ -243,7 +400,7 @@ namespace Blasphemous.Multiplayer.Client.Enemies
             if (synced == null)
                 return;
 
-            ApplyRemoteState(synced, position, life, alive, facingRight);
+            ApplyRemoteState(synced, position, life, alive, facingRight, animHash);
         }
 
         public void ReceiveDamage(int netId, float amount, string attackerName, Vector2 hitPos, string enemyTypeId)
@@ -391,12 +548,14 @@ namespace Blasphemous.Multiplayer.Client.Enemies
                         : (Vector2)synced.Enemy.transform.position);
                 float life = alive ? synced.Enemy.CurrentLife : 0f;
                 bool facingRight = IsFacingRight(synced.Enemy);
+                int animHash = alive ? synced.ReadAnimHash() : 0;
                 synced.LastSentPosition = pos;
                 synced.LastSentLife = life;
                 synced.LastSentAlive = alive;
                 synced.LastSentFacingRight = facingRight;
+                synced.LastSentAnimHash = animHash;
                 Main.Multiplayer.NetworkManager.SendEnemySnapshot(
-                    synced.NetId, synced.EnemyTypeId, pos, life, alive, facingRight);
+                    synced.NetId, synced.EnemyTypeId, pos, life, alive, facingRight, animHash);
                 sent++;
                 if (!alive)
                     deadSent++;
@@ -492,7 +651,7 @@ namespace Blasphemous.Multiplayer.Client.Enemies
             if (!alive)
                 Main.Multiplayer.NetworkManager.SendEnemyDeath(synced.NetId, pos, synced.EnemyTypeId);
             else
-                Main.Multiplayer.NetworkManager.SendEnemyState(synced.NetId, pos, life, true, facingRight);
+                Main.Multiplayer.NetworkManager.SendEnemyState(synced.NetId, pos, life, true, facingRight, synced.ReadAnimHash());
         }
 
         private void ClaimOrFollowExistingHost()
@@ -761,7 +920,7 @@ namespace Blasphemous.Multiplayer.Client.Enemies
             return best;
         }
 
-        private void ApplyRemoteState(SyncedEnemy synced, Vector2 position, float life, bool alive, bool facingRight)
+        private void ApplyRemoteState(SyncedEnemy synced, Vector2 position, float life, bool alive, bool facingRight, int animHash)
         {
             if (!synced.IsValid)
                 return;
@@ -784,10 +943,13 @@ namespace Blasphemous.Multiplayer.Client.Enemies
             if (Mathf.Abs(synced.Enemy.CurrentLife - life) > 0.1f)
                 synced.Enemy.CurrentLife = life;
 
+            synced.ApplyAnimHash(animHash);
+
             synced.LastSentPosition = position;
             synced.LastSentLife = life;
             synced.LastSentAlive = true;
             synced.LastSentFacingRight = facingRight;
+            synced.LastSentAnimHash = animHash;
         }
 
         private Enemy FindEnemyByNetId(int netId, string enemyTypeId, Vector2 hintPos)
@@ -875,8 +1037,10 @@ namespace Blasphemous.Multiplayer.Client.Enemies
         {
             _enemies.Clear();
             _pendingDeaths.Clear();
+            _remoteHitCooldown.Clear();
             _scanTimer = 0f;
             _snapshotTimer = 0f;
+            _retargetTimer = 0f;
             _requestCooldown = 0f;
             _snapshotLogCooldown = 0;
             _levelAge = 0f;

@@ -30,4 +30,7 @@ public enum NetworkType
 
     /// <summary>Non-host asks the scene host to resend all snapshots.</summary>
     EnemySyncRequest = 17,
+
+    /// <summary>Host enemy hit a remote player's avatar — apply HP on that client's Penitent.</summary>
+    EnemyPlayerHit = 18,
 }

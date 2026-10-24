@@ -156,6 +156,7 @@ namespace Blasphemous.Multiplayer.Client.Network
                         case NetworkType.EnemyDamage: ReceiveEnemyDamage(messageData); break;
                         case NetworkType.EnemyDeath: ReceiveEnemyDeath(messageData); break;
                         case NetworkType.EnemySyncRequest: ReceiveEnemySyncRequest(messageData); break;
+                        case NetworkType.EnemyPlayerHit: ReceiveEnemyPlayerHit(messageData); break;
                     }
                     startIdx += 3 + length;
                 }
@@ -485,28 +486,28 @@ namespace Blasphemous.Multiplayer.Client.Network
 
         // Enemy sync — payloads are name-prefixed by the server (same as Position/Attack)
 
-        public void SendEnemySnapshot(int netId, string enemyTypeId, Vector2 position, float life, bool alive, bool facingRight)
+        public void SendEnemySnapshot(int netId, string enemyTypeId, Vector2 position, float life, bool alive, bool facingRight, int animHash)
         {
-            QueueMesssage(BuildEnemyBody(netId, enemyTypeId, position, life, alive, facingRight, includeTypeId: true), NetworkType.EnemySnapshot);
+            QueueMesssage(BuildEnemyBody(netId, enemyTypeId, position, life, alive, facingRight, animHash, includeTypeId: true), NetworkType.EnemySnapshot);
         }
 
         private void ReceiveEnemySnapshot(byte[] data)
         {
             int idx = ExtractNameFromData(data, out string sender);
-            ReadEnemyBody(data, idx, includeTypeId: true, out int netId, out string enemyTypeId, out Vector2 position, out float life, out bool alive, out bool facingRight);
-            Main.Multiplayer.EnemyManager.ReceiveSnapshot(sender, netId, enemyTypeId, position, life, alive, facingRight);
+            ReadEnemyBody(data, idx, includeTypeId: true, out int netId, out string enemyTypeId, out Vector2 position, out float life, out bool alive, out bool facingRight, out int animHash);
+            Main.Multiplayer.EnemyManager.ReceiveSnapshot(sender, netId, enemyTypeId, position, life, alive, facingRight, animHash);
         }
 
-        public void SendEnemyState(int netId, Vector2 position, float life, bool alive, bool facingRight)
+        public void SendEnemyState(int netId, Vector2 position, float life, bool alive, bool facingRight, int animHash)
         {
-            QueueMesssage(BuildEnemyBody(netId, null, position, life, alive, facingRight, includeTypeId: false), NetworkType.EnemyState);
+            QueueMesssage(BuildEnemyBody(netId, null, position, life, alive, facingRight, animHash, includeTypeId: false), NetworkType.EnemyState);
         }
 
         private void ReceiveEnemyState(byte[] data)
         {
             int idx = ExtractNameFromData(data, out string sender);
-            ReadEnemyBody(data, idx, includeTypeId: false, out int netId, out _, out Vector2 position, out float life, out bool alive, out bool facingRight);
-            Main.Multiplayer.EnemyManager.ReceiveState(sender, netId, position, life, alive, facingRight);
+            ReadEnemyBody(data, idx, includeTypeId: false, out int netId, out _, out Vector2 position, out float life, out bool alive, out bool facingRight, out int animHash);
+            Main.Multiplayer.EnemyManager.ReceiveState(sender, netId, position, life, alive, facingRight, animHash);
         }
 
         public void SendEnemyDamage(int netId, float amount, Vector2 hitPos, string enemyTypeId)
@@ -589,7 +590,26 @@ namespace Blasphemous.Multiplayer.Client.Network
             Main.Multiplayer.EnemyManager.ReceiveSyncRequest(requester);
         }
 
-        private static byte[] BuildEnemyBody(int netId, string enemyTypeId, Vector2 position, float life, bool alive, bool facingRight, bool includeTypeId)
+        public void SendEnemyPlayerHit(string receiverName, float damageAmount)
+        {
+            byte[] nameBytes = Encoding.UTF8.GetBytes(receiverName ?? string.Empty);
+            List<byte> bytes = new();
+            bytes.Add((byte)nameBytes.Length);
+            bytes.AddRange(nameBytes);
+            bytes.AddRange(BitConverter.GetBytes(damageAmount));
+            QueueMesssage(bytes.ToArray(), NetworkType.EnemyPlayerHit);
+        }
+
+        private void ReceiveEnemyPlayerHit(byte[] data)
+        {
+            int idx = ExtractNameFromData(data, out string sender);
+            byte nameLen = data[idx];
+            string receiver = Encoding.UTF8.GetString(data, idx + 1, nameLen);
+            float amount = BitConverter.ToSingle(data, idx + 1 + nameLen);
+            Main.Multiplayer.EnemyManager.ReceiveEnemyPlayerHit(sender, receiver, amount);
+        }
+
+        private static byte[] BuildEnemyBody(int netId, string enemyTypeId, Vector2 position, float life, bool alive, bool facingRight, int animHash, bool includeTypeId)
         {
             EnemySyncFlags flags = EnemySyncFlags.None;
             if (alive) flags |= EnemySyncFlags.Alive;
@@ -601,6 +621,7 @@ namespace Blasphemous.Multiplayer.Client.Network
             bytes.AddRange(BitConverter.GetBytes(position.x));
             bytes.AddRange(BitConverter.GetBytes(position.y));
             bytes.AddRange(BitConverter.GetBytes(life));
+            bytes.AddRange(BitConverter.GetBytes(animHash));
 
             if (includeTypeId)
             {
@@ -612,7 +633,7 @@ namespace Blasphemous.Multiplayer.Client.Network
             return bytes.ToArray();
         }
 
-        private static void ReadEnemyBody(byte[] data, int idx, bool includeTypeId, out int netId, out string enemyTypeId, out Vector2 position, out float life, out bool alive, out bool facingRight)
+        private static void ReadEnemyBody(byte[] data, int idx, bool includeTypeId, out int netId, out string enemyTypeId, out Vector2 position, out float life, out bool alive, out bool facingRight, out int animHash)
         {
             netId = BitConverter.ToInt32(data, idx);
             EnemySyncFlags flags = (EnemySyncFlags)data[idx + 4];
@@ -620,11 +641,19 @@ namespace Blasphemous.Multiplayer.Client.Network
             facingRight = (flags & EnemySyncFlags.FacingRight) != 0;
             position = new Vector2(BitConverter.ToSingle(data, idx + 5), BitConverter.ToSingle(data, idx + 9));
             life = BitConverter.ToSingle(data, idx + 13);
+            animHash = 0;
+            // Protocol 9+: anim hash after life
+            if (data.Length >= idx + 21)
+                animHash = BitConverter.ToInt32(data, idx + 17);
             enemyTypeId = string.Empty;
             if (includeTypeId)
             {
-                byte typeLen = data[idx + 17];
-                enemyTypeId = Encoding.UTF8.GetString(data, idx + 18, typeLen);
+                int typeAt = idx + 21;
+                if (data.Length > typeAt)
+                {
+                    byte typeLen = data[typeAt];
+                    enemyTypeId = Encoding.UTF8.GetString(data, typeAt + 1, typeLen);
+                }
             }
         }
 
@@ -632,6 +661,6 @@ namespace Blasphemous.Multiplayer.Client.Network
         public delegate void ConnectDelegate(bool success, RefusalType refusal);
         public event ConnectDelegate OnConnect;
 
-        private const byte PROTOCOL_VERSION = 8;
+        private const byte PROTOCOL_VERSION = 9;
     }
 }

@@ -18,6 +18,7 @@ static class Program
         failures += Check((byte)NetworkType.EnemyDamage == 15, "EnemyDamage=15");
         failures += Check((byte)NetworkType.EnemyDeath == 16, "EnemyDeath=16");
         failures += Check((byte)NetworkType.EnemySyncRequest == 17, "EnemySyncRequest=17");
+        failures += Check((byte)NetworkType.EnemyPlayerHit == 18, "EnemyPlayerHit=18");
 
         // Snapshot body
         byte[] body = BuildEnemyBody(42, "EN01", 10.5f, -3.25f, 80f, alive: true, facingRight: false, includeTypeId: true);

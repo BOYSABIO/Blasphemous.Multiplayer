@@ -1,5 +1,6 @@
 ﻿using Blasphemous.ModdingAPI;
 using Blasphemous.Multiplayer.Client.Data;
+using Blasphemous.Multiplayer.Client.Enemies;
 using Blasphemous.Multiplayer.Client.PvP.Models;
 using Framework.Managers;
 using Gameplay.GameControllers.Entities;
@@ -37,11 +38,40 @@ namespace Blasphemous.Multiplayer.Client.Players
             CharacterAnim = gameObject.AddComponent<Animator>();
             CharacterAnim.runtimeAnimatorController = UnityReferences.PlayerAnimator;
 
+            // Host enemy AI / vision / contact treat this avatar like a Penitent body
+            EnsureEnemyInteractHurtbox();
+
             // Sword handler
             GameObject sword = new GameObject("Sword");
             sword.transform.SetParent(transform);
             OtherPlayerAttack = sword.AddComponent<OtherPlayerAttackScript>();
             OtherPlayerAttack.SetupAttack();
+        }
+
+        /// <summary>
+        /// Lets host-side enemies see and contact the remote player as one shared fight.
+        /// </summary>
+        private void EnsureEnemyInteractHurtbox()
+        {
+            int penitentLayer = LayerMask.NameToLayer("Penitent");
+            if (penitentLayer >= 0)
+                gameObject.layer = penitentLayer;
+
+            if (GetComponent<Rigidbody2D>() == null)
+            {
+                var rb = gameObject.AddComponent<Rigidbody2D>();
+                rb.isKinematic = true;
+                rb.simulated = true;
+                rb.gravityScale = 0f;
+            }
+
+            if (GetComponent<BoxCollider2D>() == null)
+            {
+                var hurt = gameObject.AddComponent<BoxCollider2D>();
+                hurt.isTrigger = true;
+                hurt.offset = new Vector2(0f, 0.92f);
+                hurt.size = new Vector2(0.665f, 1.866f);
+            }
         }
 
         public Vector2 CurrentPosition
@@ -250,6 +280,18 @@ namespace Blasphemous.Multiplayer.Client.Players
 
         public void Damage(Hit hit)
         {
+            // Shared room enemy (host AI) hit this remote avatar → damage that player's real Penitent
+            Enemy enemyAttacker = hit.AttackingEntity != null
+                ? hit.AttackingEntity.GetComponentInParent<Enemy>()
+                : null;
+            if (enemyAttacker != null && EnemyManager.IsSyncableEnemy(enemyAttacker))
+            {
+                if (playerDead)
+                    return;
+                Main.Multiplayer.EnemyManager?.NotifyRemotePlayerHitByEnemy(playerStatus.Name, hit.DamageAmount);
+                return;
+            }
+
             Config config = Main.Multiplayer.config;
             if (!config.enablePvP || (!config.enableFriendlyFire && Main.Multiplayer.PlayerTeam == playerStatus.Team))
                 return;
