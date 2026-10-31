@@ -401,3 +401,6 @@ FodyWeavers.xsd
 tools/**/bin/
 tools/**/obj/
 
+# Private install identity, saves, test copies and machine-specific notes
+local/
+

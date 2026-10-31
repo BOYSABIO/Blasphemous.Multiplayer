@@ -3,6 +3,8 @@ using Blasphemous.Multiplayer.Client.Enemies;
 using Blasphemous.Multiplayer.Client.Players;
 using Blasphemous.Multiplayer.Client.ProgressSync;
 using Blasphemous.Multiplayer.Client.PvP.Models;
+using Blasphemous.Multiplayer.Common;
+using Blasphemous.Multiplayer.Common.Combat;
 using Blasphemous.Multiplayer.Common.Enums;
 using Framework.Managers;
 using SimpleTCP;
@@ -26,7 +28,7 @@ namespace Blasphemous.Multiplayer.Client.Network
         public string SessionEnemyHostName => _sessionEnemyHostName;
 
         private readonly List<byte> sendingQueue = new ();
-        private readonly List<byte> receivingQueue = new ();
+        private readonly PacketBuffer receivingQueue = new();
         private static readonly object datalock = new object();
 
         // Connection
@@ -121,7 +123,7 @@ namespace Blasphemous.Multiplayer.Client.Network
         {
             lock (datalock)
             {
-                receivingQueue.AddRange(message.data);
+                receivingQueue.Append(message.data);
             }
         }
 
@@ -129,46 +131,39 @@ namespace Blasphemous.Multiplayer.Client.Network
         {
             lock (datalock)
             {
-                if (receivingQueue.Count == 0) return;
-
-                int startIdx = 0;
-                while (startIdx < receivingQueue.Count - 3)
+                while (receivingQueue.TryRead(out NetworkType type, out byte[] messageData))
                 {
-                    ushort length = BitConverter.ToUInt16(receivingQueue.GetRange(startIdx, 2).ToArray(), 0);
-                    byte type = receivingQueue[startIdx + 2];
-                    byte[] messageData = new byte[length];
-                    for (int i = 0; i < length; i++)
-                        messageData[i] = receivingQueue[startIdx + 3 + i];
-
-                    switch ((NetworkType)type)
+                    try
                     {
-                        case NetworkType.Position: ReceivePosition(messageData); break;
-                        case NetworkType.Animation: ReceiveAnimation(messageData); break;
-                        case NetworkType.Direction: ReceiveDirection(messageData); break;
-                        case NetworkType.EnterScene: ReceiveEnterScene(messageData); break;
-                        case NetworkType.LeaveScene: ReceiveLeaveScene(messageData); break;
-                        case NetworkType.Skin: ReceiveSkin(messageData); break;
-                        case NetworkType.Team: ReceiveTeam(messageData); break;
-                        case NetworkType.Connection: ReceiveConnection(messageData); break;
-                        case NetworkType.Intro: ReceiveIntro(messageData); break;
-                        case NetworkType.Progress: ReceiveProgress(messageData); break;
-                        case NetworkType.Attack: ReceiveAttack(messageData); break;
-                        case NetworkType.Effect: ReceiveEffect(messageData); break;
-                        case NetworkType.Ping: ReceivePing(messageData); break;
-                        case NetworkType.EnemySnapshot: ReceiveEnemySnapshot(messageData); break;
-                        case NetworkType.EnemyState: ReceiveEnemyState(messageData); break;
-                        case NetworkType.EnemyDamage: ReceiveEnemyDamage(messageData); break;
-                        case NetworkType.EnemyDeath: ReceiveEnemyDeath(messageData); break;
-                        case NetworkType.EnemySyncRequest: ReceiveEnemySyncRequest(messageData); break;
-                        case NetworkType.EnemyPlayerHit: ReceiveEnemyPlayerHit(messageData); break;
-                        case NetworkType.SessionEnemyHost: ReceiveSessionEnemyHost(messageData); break;
+                        switch (type)
+                        {
+                            case NetworkType.Position: ReceivePosition(messageData); break;
+                            case NetworkType.Animation: ReceiveAnimation(messageData); break;
+                            case NetworkType.Direction: ReceiveDirection(messageData); break;
+                            case NetworkType.EnterScene: ReceiveEnterScene(messageData); break;
+                            case NetworkType.LeaveScene: ReceiveLeaveScene(messageData); break;
+                            case NetworkType.Skin: ReceiveSkin(messageData); break;
+                            case NetworkType.Team: ReceiveTeam(messageData); break;
+                            case NetworkType.Connection: ReceiveConnection(messageData); break;
+                            case NetworkType.Intro: ReceiveIntro(messageData); break;
+                            case NetworkType.Progress: ReceiveProgress(messageData); break;
+                            case NetworkType.Attack: ReceiveAttack(messageData); break;
+                            case NetworkType.Effect: ReceiveEffect(messageData); break;
+                            case NetworkType.Ping: ReceivePing(messageData); break;
+                            case NetworkType.EnemySnapshot: ReceiveEnemySnapshot(messageData); break;
+                            case NetworkType.EnemyState: ReceiveEnemyState(messageData); break;
+                            case NetworkType.EnemyDamage: ReceiveEnemyDamage(messageData); break;
+                            case NetworkType.EnemyDeath: ReceiveEnemyDeath(messageData); break;
+                            case NetworkType.EnemySyncRequest: ReceiveEnemySyncRequest(messageData); break;
+                            case NetworkType.EnemyPlayerHit: ReceiveEnemyPlayerHit(messageData); break;
+                            case NetworkType.SessionEnemyHost: ReceiveSessionEnemyHost(messageData); break;
+                        }
                     }
-                    startIdx += 3 + length;
+                    catch (Exception ex)
+                    {
+                        ModLog.Warn($"Discarding invalid {type} packet: {ex.Message}");
+                    }
                 }
-                if (startIdx != receivingQueue.Count)
-                    ModLog.Error("Received data was formatted incorrectly");
-
-                receivingQueue.Clear();
             }
         }
 
@@ -535,40 +530,17 @@ namespace Blasphemous.Multiplayer.Client.Network
             Main.Multiplayer.EnemyManager.ReceiveState(sender, netId, position, life, alive, facingRight, animHash, animTime);
         }
 
-        public void SendEnemyDamage(int netId, float amount, Vector2 hitPos, string enemyTypeId)
+        public void SendEnemyDamage(int netId, EnemyHitData hit, Vector2 hitPos, string enemyTypeId)
         {
-            List<byte> bytes = new();
-            bytes.AddRange(BitConverter.GetBytes(netId));
-            bytes.AddRange(BitConverter.GetBytes(amount));
-            bytes.AddRange(BitConverter.GetBytes(hitPos.x));
-            bytes.AddRange(BitConverter.GetBytes(hitPos.y));
-            byte[] typeBytes = Encoding.UTF8.GetBytes(enemyTypeId ?? string.Empty);
-            bytes.Add((byte)typeBytes.Length);
-            bytes.AddRange(typeBytes);
-            QueueMesssage(bytes.ToArray(), NetworkType.EnemyDamage);
+            QueueMesssage(EnemyPackets.WriteDamage(netId, enemyTypeId, hitPos.x, hitPos.y, hit), NetworkType.EnemyDamage);
         }
 
         private void ReceiveEnemyDamage(byte[] data)
         {
             int startIdx = ExtractNameFromData(data, out string attackerName);
-            int netId = BitConverter.ToInt32(data, startIdx);
-            float amount = BitConverter.ToSingle(data, startIdx + 4);
-            Vector2 hitPos = Vector2.zero;
-            string enemyTypeId = string.Empty;
-            if (data.Length >= startIdx + 16)
-            {
-                hitPos = new Vector2(
-                    BitConverter.ToSingle(data, startIdx + 8),
-                    BitConverter.ToSingle(data, startIdx + 12));
-            }
-            // Protocol 7+: enemy type id for remap
-            if (data.Length > startIdx + 16)
-            {
-                byte typeLen = data[startIdx + 16];
-                if (typeLen > 0 && startIdx + 17 + typeLen <= data.Length)
-                    enemyTypeId = Encoding.UTF8.GetString(data, startIdx + 17, typeLen);
-            }
-            Main.Multiplayer.EnemyManager.ReceiveDamage(netId, amount, attackerName, hitPos, enemyTypeId);
+            EnemyPackets.ReadDamage(data, startIdx, out int netId, out string enemyTypeId,
+                out float x, out float y, out EnemyHitData hit);
+            Main.Multiplayer.EnemyManager.ReceiveDamage(netId, hit, attackerName, new Vector2(x, y), enemyTypeId);
         }
 
         public void SendEnemyDeath(int netId, Vector2 deathPos, string enemyTypeId)
@@ -615,83 +587,39 @@ namespace Blasphemous.Multiplayer.Client.Network
             Main.Multiplayer.EnemyManager.ReceiveSyncRequest(requester);
         }
 
-        public void SendEnemyPlayerHit(string receiverName, float damageAmount)
+        public void SendEnemyPlayerHit(string receiverName, EnemyHitData hit)
         {
-            byte[] nameBytes = Encoding.UTF8.GetBytes(receiverName ?? string.Empty);
-            List<byte> bytes = new();
-            bytes.Add((byte)nameBytes.Length);
-            bytes.AddRange(nameBytes);
-            bytes.AddRange(BitConverter.GetBytes(damageAmount));
-            QueueMesssage(bytes.ToArray(), NetworkType.EnemyPlayerHit);
+            QueueMesssage(EnemyPackets.WritePlayerHit(receiverName, hit), NetworkType.EnemyPlayerHit);
         }
 
         private void ReceiveEnemyPlayerHit(byte[] data)
         {
             int idx = ExtractNameFromData(data, out string sender);
-            byte nameLen = data[idx];
-            string receiver = Encoding.UTF8.GetString(data, idx + 1, nameLen);
-            float amount = BitConverter.ToSingle(data, idx + 1 + nameLen);
-            Main.Multiplayer.EnemyManager.ReceiveEnemyPlayerHit(sender, receiver, amount);
+            EnemyPackets.ReadPlayerHit(data, idx, out string receiver, out EnemyHitData hit);
+            Main.Multiplayer.EnemyManager.ReceiveEnemyPlayerHit(sender, receiver, hit);
         }
 
         private static byte[] BuildEnemyBody(int netId, string enemyTypeId, Vector2 position, float life, bool alive, bool facingRight, int animHash, float animTime, bool includeTypeId)
         {
-            EnemySyncFlags flags = EnemySyncFlags.None;
-            if (alive) flags |= EnemySyncFlags.Alive;
-            if (facingRight) flags |= EnemySyncFlags.FacingRight;
-
-            List<byte> bytes = new();
-            bytes.AddRange(BitConverter.GetBytes(netId));
-            bytes.Add((byte)flags);
-            bytes.AddRange(BitConverter.GetBytes(position.x));
-            bytes.AddRange(BitConverter.GetBytes(position.y));
-            bytes.AddRange(BitConverter.GetBytes(life));
-            bytes.AddRange(BitConverter.GetBytes(animHash));
-            bytes.AddRange(BitConverter.GetBytes(animTime));
-
-            if (includeTypeId)
+            return new EnemyStateData
             {
-                byte[] idBytes = Encoding.UTF8.GetBytes(enemyTypeId ?? string.Empty);
-                bytes.Add((byte)idBytes.Length);
-                bytes.AddRange(idBytes);
-            }
-
-            return bytes.ToArray();
+                Id = netId, Type = enemyTypeId ?? string.Empty, X = position.x, Y = position.y,
+                Life = life, Alive = alive, FacingRight = facingRight, AnimationHash = animHash, AnimationTime = animTime,
+            }.Encode(includeTypeId);
         }
 
         private static void ReadEnemyBody(byte[] data, int idx, bool includeTypeId, out int netId, out string enemyTypeId, out Vector2 position, out float life, out bool alive, out bool facingRight, out int animHash, out float animTime)
         {
-            netId = BitConverter.ToInt32(data, idx);
-            EnemySyncFlags flags = (EnemySyncFlags)data[idx + 4];
-            alive = (flags & EnemySyncFlags.Alive) != 0;
-            facingRight = (flags & EnemySyncFlags.FacingRight) != 0;
-            position = new Vector2(BitConverter.ToSingle(data, idx + 5), BitConverter.ToSingle(data, idx + 9));
-            life = BitConverter.ToSingle(data, idx + 13);
-            animHash = 0;
-            animTime = 0f;
-            // Protocol 9+: anim hash after life
-            if (data.Length >= idx + 21)
-                animHash = BitConverter.ToInt32(data, idx + 17);
-            // Protocol 11+: normalized anim time after hash
-            if (data.Length >= idx + 25)
-                animTime = BitConverter.ToSingle(data, idx + 21);
-            enemyTypeId = string.Empty;
-            if (includeTypeId)
-            {
-                int typeAt = data.Length >= idx + 25 ? idx + 25 : idx + 21;
-                if (data.Length > typeAt)
-                {
-                    byte typeLen = data[typeAt];
-                    if (typeLen > 0 && typeAt + 1 + typeLen <= data.Length)
-                        enemyTypeId = Encoding.UTF8.GetString(data, typeAt + 1, typeLen);
-                }
-            }
+            EnemyStateData state = EnemyStateData.Decode(data, idx, includeTypeId);
+            netId = state.Id; enemyTypeId = state.Type; position = new Vector2(state.X, state.Y);
+            life = state.Life; alive = state.Alive; facingRight = state.FacingRight;
+            animHash = state.AnimationHash; animTime = state.AnimationTime;
         }
 
         // Maybe replace name with entire ConnectInfo
         public delegate void ConnectDelegate(bool success, RefusalType refusal);
         public event ConnectDelegate OnConnect;
 
-        private const byte PROTOCOL_VERSION = 12;
+        private const byte PROTOCOL_VERSION = Protocol.VERSION;
     }
 }

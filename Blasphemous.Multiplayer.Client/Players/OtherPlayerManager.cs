@@ -372,12 +372,13 @@ namespace Blasphemous.Multiplayer.Client.Players
             PlayerStatus player = FindConnectedPlayer(playerName);
             if (player == null) return;
 
-            if (Core.LevelManager.currentLevel.LevelName == player.CurrentScene)
+            bool wasHere = Core.LevelManager.currentLevel.LevelName == player.CurrentScene;
+            player.CurrentScene = string.Empty;
+            if (wasHere)
             {
                 RemoveActivePlayer(playerName);
                 Main.Multiplayer.EnemyManager.OnPlayersInSceneChanged();
             }
-            player.CurrentScene = string.Empty;
 
             Main.Multiplayer.MapManager.QueueMapUpdate();
         }

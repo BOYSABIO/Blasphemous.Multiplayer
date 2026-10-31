@@ -24,6 +24,13 @@ namespace Blasphemous.Multiplayer.Client.Enemies
         public float LastSentAnimTime { get; set; }
 
         public bool IsPuppet { get; private set; }
+        public bool IsBoss => EnemyManager.IsBossEnemy(Enemy);
+        private bool _authorityApplied;
+        private bool _behaviourEnabled;
+        private bool _treeRunning;
+        private bool _controllerEnabled;
+        private bool _hasPuppetState;
+        private readonly System.Collections.Generic.Dictionary<Collider2D, bool> _colliderStates = new();
         public bool VisuallyDead { get; private set; }
         public bool BodyHidden { get; private set; }
         /// <summary>Unity time when the corpse should hard-hide (0 = none).</summary>
@@ -39,6 +46,10 @@ namespace Blasphemous.Multiplayer.Client.Enemies
         public void Bind(Enemy enemy)
         {
             Enemy = enemy;
+            _authorityApplied = false;
+            _hasPuppetState = false;
+            IsPuppet = false;
+            _colliderStates.Clear();
             VisuallyDead = false;
             BodyHidden = false;
             HideBodyAt = 0f;
@@ -57,7 +68,7 @@ namespace Blasphemous.Multiplayer.Client.Enemies
         {
             if (Enemy == null || Enemy.Animator == null)
                 return 0;
-            return Enemy.Animator.GetCurrentAnimatorStateInfo(0).shortNameHash;
+            return Enemy.Animator.GetCurrentAnimatorStateInfo(0).fullPathHash;
         }
 
         public float ReadAnimTime()
@@ -75,7 +86,8 @@ namespace Blasphemous.Multiplayer.Client.Enemies
         {
             if (VisuallyDead || BodyHidden || LastSentAlive == false)
                 return;
-            if (animHash == 0 || Enemy == null || Enemy.Animator == null)
+            if (animHash == 0 || Enemy == null || Enemy.Animator == null
+                || !Blasphemous.Multiplayer.Common.Combat.EnemyHitData.Finite(normalizedTime))
                 return;
 
             Animator animator = Enemy.Animator;
@@ -84,15 +96,18 @@ namespace Blasphemous.Multiplayer.Client.Enemies
 
             AnimatorStateInfo current = animator.GetCurrentAnimatorStateInfo(0);
 
-            if (current.shortNameHash != animHash)
+            if (!animator.HasState(0, animHash))
+                return;
+            if (current.fullPathHash != animHash)
             {
-                animator.Play(animHash, 0, Mathf.Clamp01(normalizedTime % 1f));
+                animator.Play(animHash, 0, normalizedTime);
                 animator.Update(0f);
             }
             else
             {
-                float local = current.normalizedTime % 1f;
-                float remote = normalizedTime % 1f;
+                // Preserve completed non-looping attacks. Modulo 1 restarts their hit events.
+                float local = current.loop ? current.normalizedTime % 1f : current.normalizedTime;
+                float remote = current.loop ? normalizedTime % 1f : normalizedTime;
                 if (Mathf.Abs(local - remote) > 0.12f)
                 {
                     animator.Play(animHash, 0, remote);
@@ -106,6 +121,10 @@ namespace Blasphemous.Multiplayer.Client.Enemies
 
         public void SetPuppet(bool puppet)
         {
+            // Boss behaviour owns phase transitions, arenas, projectiles and cutscenes.
+            // Shared health uses that behaviour locally rather than disabling it.
+            if (IsBoss)
+                return;
             if (VisuallyDead || (Enemy != null && Enemy.Dead) || LastSentAlive == false)
             {
                 IsPuppet = true;
@@ -117,12 +136,18 @@ namespace Blasphemous.Multiplayer.Client.Enemies
                 return;
             }
 
-            if (IsPuppet == puppet && Enemy != null)
+            if (_authorityApplied && IsPuppet == puppet && Enemy != null)
             {
-                ApplyPuppetState(puppet);
+                if (puppet)
+                {
+                    if (Enemy.Controller != null)
+                        Enemy.Controller.enabled = false;
+                    DisableOutboundAttackColliders();
+                }
                 return;
             }
 
+            _authorityApplied = true;
             IsPuppet = puppet;
             ApplyPuppetState(puppet);
         }
@@ -217,18 +242,41 @@ namespace Blasphemous.Multiplayer.Client.Enemies
                 return;
 
             var behaviour = Enemy.EnemyBehaviour;
+            if (Enemy.Controller != null)
+            {
+                if (puppet)
+                {
+                    if (!_hasPuppetState)
+                        _controllerEnabled = Enemy.Controller.enabled;
+                    Enemy.Controller.enabled = false;
+                }
+                else if (_hasPuppetState)
+                    Enemy.Controller.enabled = _controllerEnabled;
+            }
             if (behaviour != null)
             {
                 if (puppet)
                 {
+                    if (!_hasPuppetState)
+                    {
+                        _behaviourEnabled = behaviour.enabled;
+                        _treeRunning = behaviour.BehaviourTree != null && behaviour.BehaviourTree.isRunning;
+                    }
                     behaviour.StopBehaviour();
+                    behaviour.StopAllCoroutines();
                     behaviour.StopMovement();
                     behaviour.enabled = false;
                 }
                 else if (!VisuallyDead && !Enemy.Dead)
                 {
-                    behaviour.enabled = true;
-                    behaviour.StartBehaviour();
+                    // Restore only state changed by this class. First host scan must not
+                    // restart dormant AI or interrupt a scripted encounter intro.
+                    if (_hasPuppetState)
+                    {
+                        behaviour.enabled = _behaviourEnabled;
+                        if (_treeRunning)
+                            behaviour.StartBehaviour();
+                    }
                 }
             }
 
@@ -240,6 +288,16 @@ namespace Blasphemous.Multiplayer.Client.Enemies
             // Only strip outbound attack volumes. Dead bodies strip everything on hard-hide.
             if (puppet && !VisuallyDead)
                 DisableOutboundAttackColliders();
+            if (puppet)
+                _hasPuppetState = true;
+            if (!puppet)
+            {
+                foreach (var state in _colliderStates)
+                    if (state.Key != null)
+                        state.Key.enabled = state.Value;
+                _colliderStates.Clear();
+                _hasPuppetState = false;
+            }
         }
 
         /// <summary>
@@ -265,6 +323,7 @@ namespace Blasphemous.Multiplayer.Client.Enemies
                 // ContactDamage is outbound touch damage from the enemy
                 if (col.GetComponentInParent<ContactDamage>() != null)
                 {
+                    if (!_colliderStates.ContainsKey(col)) _colliderStates[col] = col.enabled;
                     col.enabled = false;
                     continue;
                 }
@@ -272,6 +331,7 @@ namespace Blasphemous.Multiplayer.Client.Enemies
                 // AttackArea / weapon volumes
                 if (col.GetComponentInParent<AttackArea>() != null)
                 {
+                    if (!_colliderStates.ContainsKey(col)) _colliderStates[col] = col.enabled;
                     col.enabled = false;
                     continue;
                 }

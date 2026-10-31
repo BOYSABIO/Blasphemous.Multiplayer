@@ -11,8 +11,8 @@
         public bool enablePvP;
         public bool enableFriendlyFire;
         /// <summary>
-        /// Optional override: this player name always owns enemy AI when in the room.
-        /// Empty = use the server's session preferred host (first player who connected).
+        /// Legacy setting retained for existing config files. Enemy authority now follows
+        /// the server's session host so clients cannot select conflicting owners.
         /// </summary>
         public string preferredEnemyHost;
         public SyncSettings syncSettings;

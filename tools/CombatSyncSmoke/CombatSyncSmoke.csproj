@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>disable</Nullable>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../Blasphemous.Multiplayer.Common/Blasphemous.Multiplayer.Common.csproj" />
+    <Compile Include="../../Blasphemous.Multiplayer.Client/Enemies/EnemyManager.cs" Link="Production/EnemyManager.cs" />
+    <Compile Include="../../Blasphemous.Multiplayer.Client/Enemies/SyncedEnemy.cs" Link="Production/SyncedEnemy.cs" />
+    <Compile Include="../../Blasphemous.Multiplayer.Client/Enemies/EnemyPatches.cs" Link="Production/EnemyPatches.cs" />
+    <Compile Include="../../Blasphemous.Multiplayer.Client/Enemies/CombatHit.cs" Link="Production/CombatHit.cs" />
+  </ItemGroup>
+</Project>

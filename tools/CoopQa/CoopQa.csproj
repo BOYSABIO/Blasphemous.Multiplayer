@@ -1,0 +1,13 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net35</TargetFramework>
+    <LangVersion>latest</LangVersion>
+    <AssemblyName>Blasphemous.CoopQA</AssemblyName>
+    <Version>0.1.0</Version>
+    <GenerateAssemblyInfo>true</GenerateAssemblyInfo>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Blasphemous.GameLibs" Version="4.0.67" />
+    <PackageReference Include="Blasphemous.ModdingAPI" Version="3.0.0" />
+  </ItemGroup>
+</Project>

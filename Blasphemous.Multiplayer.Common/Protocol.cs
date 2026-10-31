@@ -2,8 +2,7 @@
 
 public static class Protocol
 {
-    // Maybe use this instead of two separate ones
-    public const int VERSION = 0;
+    public const byte VERSION = 13;
 
     /// <summary>
     /// The default ip used by client and server

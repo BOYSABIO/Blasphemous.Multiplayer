@@ -4,6 +4,7 @@ using Blasphemous.Multiplayer.Client.Enemies;
 using Blasphemous.Multiplayer.Client.PvP.Models;
 using Framework.Managers;
 using Gameplay.GameControllers.Entities;
+using Gameplay.GameControllers.Entities.Weapon;
 using System.Linq;
 using Tools.Level.Interactables;
 using UnityEngine;
@@ -21,6 +22,7 @@ namespace Blasphemous.Multiplayer.Client.Players
         public OtherPlayerAttackScript OtherPlayerAttack { get; private set; }
 
         public string PlayerName => playerStatus?.Name ?? string.Empty;
+        public bool IsDead => playerDead;
 
         public bool IsFacingRight => CharacterRenderer != null && !CharacterRenderer.flipX;
 
@@ -257,10 +259,6 @@ namespace Blasphemous.Multiplayer.Client.Players
                 SetDeathStatus(true);
                 playerDead = true;
             }
-            else
-            {
-                playerDead = false;
-            }
         }
 
         private void SetDeathStatus(bool dead)
@@ -286,11 +284,15 @@ namespace Blasphemous.Multiplayer.Client.Players
             Enemy enemyAttacker = hit.AttackingEntity != null
                 ? hit.AttackingEntity.GetComponentInParent<Enemy>()
                 : null;
+            if (enemyAttacker == null && hit.AttackingEntity != null)
+                enemyAttacker = hit.AttackingEntity.GetComponentInParent<Weapon>()?.WeaponOwner as Enemy;
             if (enemyAttacker != null && EnemyManager.IsSyncableEnemy(enemyAttacker))
             {
                 if (playerDead)
                     return;
-                Main.Multiplayer.EnemyManager?.NotifyRemotePlayerHitByEnemy(playerStatus.Name, hit.DamageAmount);
+                // Boss hazards run locally on each client with shared boss HP.
+                if (!EnemyManager.IsBossEnemy(enemyAttacker))
+                    Main.Multiplayer.EnemyManager?.NotifyRemotePlayerHitByEnemy(playerStatus.Name, hit);
                 return;
             }
 

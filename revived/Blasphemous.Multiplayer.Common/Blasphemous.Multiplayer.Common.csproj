@@ -1,0 +1,8 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFrameworks>net35;net8.0</TargetFrameworks>
+    <AssemblyName>Blasphemous.Multiplayer.Common</AssemblyName>
+    <RootNamespace>Blasphemous.Multiplayer.Common</RootNamespace>
+    <Description>Recovered protocol-16 Blasphemous multiplayer codecs.</Description>
+  </PropertyGroup>
+</Project>

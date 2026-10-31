@@ -1,123 +1,95 @@
 using System.Text;
+using Blasphemous.Multiplayer.Common;
+using Blasphemous.Multiplayer.Common.Combat;
 using Blasphemous.Multiplayer.Common.Enums;
 
-/// <summary>
-/// Offline smoke test for room-enemy packet layout (protocol v4).
-/// Mirrors client BuildEnemyBody / server name-prefix / client ReadEnemyBody.
-/// </summary>
-static class Program
+static partial class Program
 {
-    const byte Alive = 1 << 0;
-    const byte FacingRight = 1 << 1;
-
-    static int Main()
+    static int checks;
+    static void Check(bool ok, string label)
     {
-        int failures = 0;
-        failures += Check((byte)NetworkType.EnemySnapshot == 13, "EnemySnapshot=13");
-        failures += Check((byte)NetworkType.EnemyState == 14, "EnemyState=14");
-        failures += Check((byte)NetworkType.EnemyDamage == 15, "EnemyDamage=15");
-        failures += Check((byte)NetworkType.EnemyDeath == 16, "EnemyDeath=16");
-        failures += Check((byte)NetworkType.EnemySyncRequest == 17, "EnemySyncRequest=17");
-        failures += Check((byte)NetworkType.EnemyPlayerHit == 18, "EnemyPlayerHit=18");
+        if (!ok) throw new Exception(label);
+        checks++;
+    }
+    static byte[] Frame(NetworkType type, byte[] body) => BitConverter.GetBytes((ushort)body.Length).Concat(new[] { (byte)type }).Concat(body).ToArray();
+    static byte[] Named(string name, byte[] body)
+    {
+        byte[] text = Encoding.UTF8.GetBytes(name);
+        return new[] { (byte)text.Length }.Concat(text).Concat(body).ToArray();
+    }
+    static bool Rejected(Action action)
+    {
+        try { action(); return false; }
+        catch (IOException) { return true; }
+        catch (InvalidDataException) { return true; }
+        catch (ArgumentException) { return true; }
+    }
+    static void Main()
+    {
+        Check(Protocol.VERSION == 13, "current protocol");
+        var state = new EnemyStateData { Id = 42, Type = "BO01|Boss", X = 10.5f, Y = -3.25f, Life = 80,
+            Alive = true, FacingRight = false, AnimationHash = -17001, AnimationTime = 1.75f };
+        byte[] wrapped = Named("Höst", state.Encode(true));
+        var decoded = EnemyStateData.Decode(wrapped, 1 + wrapped[0], true);
+        Check(decoded.Id == 42 && decoded.Type == state.Type && decoded.X == 10.5f && decoded.Y == -3.25f
+            && decoded.Life == 80 && decoded.Alive && !decoded.FacingRight && decoded.AnimationHash == -17001
+            && decoded.AnimationTime == 1.75f, "snapshot preserves state, animation and UTF-8 prefix offsets");
+        decoded = EnemyStateData.Decode(state.Encode(false), 0, false);
+        Check(decoded.Type == "" && decoded.AnimationTime == 1.75f, "delta layout");
+        byte[] body = state.Encode(true);
+        for (int n = 0; n < body.Length; n++)
+            Check(Rejected(() => EnemyStateData.Decode(body[..n], 0, true)), $"truncated state {n}");
+        Check(Rejected(() => EnemyStateData.Decode(body.Concat(new byte[1]).ToArray(), 0, true)), "extra state bytes rejected");
+        state.Life = float.NaN;
+        Check(Rejected(() => EnemyStateData.Decode(state.Encode(true), 0, true)), "NaN health rejected");
+        var hit = new EnemyHitData { Damage = 12.5f, Force = 2f, DamageType = 1, DamageElement = 4,
+            SourceX = -2, SourceY = 5, Flags = EnemyHitData.ThrowbackByPosition | EnemyHitData.Unblockable };
+        body = EnemyPackets.WriteDamage(7, "enemy|Type", 11, 22, hit);
+        EnemyPackets.ReadDamage(body, 0, out int id, out string type, out float x, out float y, out var readHit);
+        Check(id == 7 && type == "enemy|Type" && x == 11 && y == 22 && readHit.Damage == 12.5f
+            && readHit.DamageType == 1 && readHit.DamageElement == 4 && readHit.Force == 2 && readHit.Flags == hit.Flags
+            && readHit.SourceX == -2 && readHit.SourceY == 5 && !readHit.DirectDamage, "full combat hit survives transport");
+        for (int n = 0; n < body.Length; n++)
+            Check(Rejected(() => EnemyPackets.ReadDamage(body[..n], 0, out _, out _, out _, out _, out _)), $"truncated hit {n}");
+        Check(Rejected(() => EnemyPackets.WriteDamage(1, new string('é', 128), 0, 0, hit)), "UTF-8 type length bound");
+        hit.Damage = float.PositiveInfinity;
+        Check(Rejected(() => EnemyPackets.WriteDamage(1, "x", 0, 0, hit)), "infinite hit rejected");
+        hit.Damage = 8; hit.DirectDamage = true;
+        EnemyPackets.ReadDamage(EnemyPackets.WriteDamage(1,"x",0,0,hit),0,out _,out _,out _,out _,out readHit);
+        Check(readHit.DirectDamage, "scripted raw damage remains distinct from Hit replay");
+        hit.DirectDamage = false;
+        EnemyPackets.ReadPlayerHit(EnemyPackets.WritePlayerHit("Guest",hit),0,out string receiver,out readHit);
+        Check(receiver == "Guest" && readHit.Flags == hit.Flags, "enemy player hit preserves combat rules");
 
-        // Snapshot body
-        byte[] body = BuildEnemyBody(42, "EN01", 10.5f, -3.25f, 80f, alive: true, facingRight: false, includeTypeId: true);
-        byte[] wrapped = WrapName("HostPlayer", body);
-        int idx = UnwrapName(wrapped, out string name);
-        failures += Check(name == "HostPlayer", "name prefix");
-        ReadEnemyBody(wrapped, idx, includeTypeId: true,
-            out int netId, out string typeId, out float x, out float y, out float life, out bool alive, out bool facingRight);
-        failures += Check(netId == 42, "netId");
-        failures += Check(typeId == "EN01", "typeId");
-        failures += Check(Near(x, 10.5f) && Near(y, -3.25f), "position");
-        failures += Check(Near(life, 80f), "life");
-        failures += Check(alive && !facingRight, "flags");
-
-        // Damage body
-        var dmg = new List<byte>();
-        dmg.AddRange(BitConverter.GetBytes(7));
-        dmg.AddRange(BitConverter.GetBytes(12.5f));
-        byte[] dmgWrapped = WrapName("Attacker", dmg.ToArray());
-        int dIdx = UnwrapName(dmgWrapped, out string attacker);
-        int dNet = BitConverter.ToInt32(dmgWrapped, dIdx);
-        float dAmt = BitConverter.ToSingle(dmgWrapped, dIdx + 4);
-        failures += Check(attacker == "Attacker" && dNet == 7 && Near(dAmt, 12.5f), "damage packet");
-
-        // Death body
-        byte[] deathWrapped = WrapName("HostPlayer", BitConverter.GetBytes(99));
-        int deathIdx = UnwrapName(deathWrapped, out _);
-        failures += Check(BitConverter.ToInt32(deathWrapped, deathIdx) == 99, "death packet");
-
-        if (failures == 0)
+        byte[] stream = Frame(NetworkType.EnemyDamage, body).Concat(Frame(NetworkType.Ping,new byte[] { 1 }))
+            .Concat(Frame(NetworkType.EnemySyncRequest,Array.Empty<byte>())).ToArray();
+        for (int split = 0; split <= stream.Length; split++)
         {
-            Console.WriteLine("EnemyProtocolSmoke: PASS (protocol v4 enemy packets)");
-            return 0;
+            var buffer = new PacketBuffer();
+            var packets = new List<(NetworkType Type, byte[] Body)>();
+            buffer.Append(stream[..split]);
+            while (buffer.TryRead(out var t, out var b)) packets.Add((t,b));
+            buffer.Append(stream[split..]);
+            while (buffer.TryRead(out var t, out var b)) packets.Add((t,b));
+            Check(packets.Count == 3 && packets[0].Type == NetworkType.EnemyDamage && packets[0].Body.SequenceEqual(body)
+                && packets[1].Type == NetworkType.Ping && packets[2].Body.Length == 0, $"TCP split at {split}");
         }
-
-        Console.WriteLine($"EnemyProtocolSmoke: FAIL ({failures})");
-        return 1;
-    }
-
-    static int Check(bool ok, string label)
-    {
-        Console.WriteLine(ok ? $"  OK  {label}" : $"  FAIL {label}");
-        return ok ? 0 : 1;
-    }
-
-    static bool Near(float a, float b) => Math.Abs(a - b) < 0.0001f;
-
-    static byte[] BuildEnemyBody(int netId, string enemyTypeId, float x, float y, float life, bool alive, bool facingRight, bool includeTypeId)
-    {
-        byte flags = 0;
-        if (alive) flags |= Alive;
-        if (facingRight) flags |= FacingRight;
-
-        var bytes = new List<byte>();
-        bytes.AddRange(BitConverter.GetBytes(netId));
-        bytes.Add(flags);
-        bytes.AddRange(BitConverter.GetBytes(x));
-        bytes.AddRange(BitConverter.GetBytes(y));
-        bytes.AddRange(BitConverter.GetBytes(life));
-        if (includeTypeId)
+        var bytewise = new PacketBuffer(); int count = 0;
+        foreach (byte value in stream)
         {
-            byte[] idBytes = Encoding.UTF8.GetBytes(enemyTypeId);
-            bytes.Add((byte)idBytes.Length);
-            bytes.AddRange(idBytes);
+            bytewise.Append(new[] { value });
+            while (bytewise.TryRead(out _, out _)) count++;
         }
-        return bytes.ToArray();
-    }
-
-    static byte[] WrapName(string name, byte[] body)
-    {
-        byte[] nameBytes = Encoding.UTF8.GetBytes(name);
-        var bytes = new List<byte> { (byte)nameBytes.Length };
-        bytes.AddRange(nameBytes);
-        bytes.AddRange(body);
-        return bytes.ToArray();
-    }
-
-    static int UnwrapName(byte[] data, out string name)
-    {
-        byte len = data[0];
-        name = Encoding.UTF8.GetString(data, 1, len);
-        return 1 + len;
-    }
-
-    static void ReadEnemyBody(byte[] data, int idx, bool includeTypeId,
-        out int netId, out string enemyTypeId, out float x, out float y, out float life, out bool alive, out bool facingRight)
-    {
-        netId = BitConverter.ToInt32(data, idx);
-        byte flags = data[idx + 4];
-        alive = (flags & Alive) != 0;
-        facingRight = (flags & FacingRight) != 0;
-        x = BitConverter.ToSingle(data, idx + 5);
-        y = BitConverter.ToSingle(data, idx + 9);
-        life = BitConverter.ToSingle(data, idx + 13);
-        enemyTypeId = string.Empty;
-        if (includeTypeId)
-        {
-            byte typeLen = data[idx + 17];
-            enemyTypeId = Encoding.UTF8.GetString(data, idx + 18, typeLen);
-        }
+        Check(count == 3, "bytewise TCP fragmentation");
+        var full = new PacketBuffer(); byte[] maximum = new byte[ushort.MaxValue];
+        full.Append(Frame(NetworkType.Skin,maximum));
+        Check(full.TryRead(out _,out var maxBody) && maxBody.Length == ushort.MaxValue, "maximum frame");
+        full.Append(new byte[] { 10, 0, 1 }); full.Clear(); full.Append(Frame(NetworkType.Ping,new byte[] { 9 }));
+        Check(full.TryRead(out _,out var fresh) && fresh.SequenceEqual(new byte[] { 9 }), "disconnect clears partial frames");
+        Check(EnemyAuthority.Resolve(new[] { "Zulu","Alpha" }, "absent") == "Alpha"
+            && EnemyAuthority.Resolve(new[] { "Alpha","Zulu" }, "absent") == "Alpha", "fallback authority ignores arrival order");
+        Check(EnemyAuthority.Resolve(new[] { "Alpha","Zulu" }, "Zulu") == "Zulu", "session host has priority");
+        NetworkIntegration();
+        Console.WriteLine($"EnemyProtocolSmoke: PASS ({checks} checks; protocol {Protocol.VERSION}; real server relay)");
     }
 }

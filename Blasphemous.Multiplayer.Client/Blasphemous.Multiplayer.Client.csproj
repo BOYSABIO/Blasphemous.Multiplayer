@@ -37,28 +37,27 @@
 
   <Target Name="Development" AfterTargets="PostBuildEvent">
 
-    <!-- Update dependencies -->
-    <Copy SourceFiles="$(OutDir)Blasphemous.Multiplayer.Common.dll" DestinationFolder="$(SolutionDir)\resources\data" SkipUnchangedFiles="true" />
-
     <!-- Get plugin & resources -->
     <ItemGroup>
       <PluginDll Include="$(TargetPath)" />
-      <Resources Include="$(SolutionDir)\resources\**\*.*" />
+      <Resources Include="$(MSBuildProjectDirectory)\..\resources\**\*.*" Exclude="$(MSBuildProjectDirectory)\..\resources\data\Blasphemous.Multiplayer.Common.dll" />
     </ItemGroup>
 
     <!-- Get export directories -->
     <PropertyGroup>
-      <DevFolder>C:\Program Files (x86)\Steam\steamapps\common\Blasphemous\Modding\</DevFolder>
-      <PublishFolder>$(SolutionDir)\publish\$(TargetName)</PublishFolder>
+      <DevFolder Condition="'$(DevFolder)' == ''">C:\Program Files (x86)\Steam\steamapps\common\Blasphemous\Modding\</DevFolder>
+      <PublishFolder>$(MSBuildProjectDirectory)\..\publish\$(TargetName)</PublishFolder>
     </PropertyGroup>
 
     <!-- Export to dev folder -->
-    <Copy SourceFiles="@(Resources)" DestinationFolder="$(DevFolder)\%(RecursiveDir)" SkipUnchangedFiles="true" />
-    <Copy SourceFiles="@(PluginDll)" DestinationFolder="$(DevFolder)\plugins" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="@(Resources)" DestinationFolder="$(DevFolder)\%(RecursiveDir)" SkipUnchangedFiles="true" Condition="'$(DeployToGame)' == 'true'" />
+    <Copy SourceFiles="@(PluginDll)" DestinationFolder="$(DevFolder)\plugins" SkipUnchangedFiles="true" Condition="'$(DeployToGame)' == 'true'" />
+    <Copy SourceFiles="$(OutDir)Blasphemous.Multiplayer.Common.dll" DestinationFolder="$(DevFolder)\data" Condition="'$(DeployToGame)' == 'true'" />
 
     <!-- Export to publish folder -->
     <RemoveDir Directories="$(PublishFolder)" />
     <Copy SourceFiles="@(Resources)" DestinationFolder="$(PublishFolder)\%(RecursiveDir)" SkipUnchangedFiles="true" />
+    <Copy SourceFiles="$(OutDir)Blasphemous.Multiplayer.Common.dll" DestinationFolder="$(PublishFolder)\data" />
     <Copy SourceFiles="@(PluginDll)" DestinationFolder="$(PublishFolder)\plugins" SkipUnchangedFiles="true" />
     <ZipDirectory SourceDirectory="$(PublishFolder)" DestinationFile="$(PublishFolder)\..\$(TargetName).zip" Overwrite="true" />
 

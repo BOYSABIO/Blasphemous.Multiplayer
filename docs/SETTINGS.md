@@ -5,9 +5,9 @@
 
 | Setting | Description | Default |
 | ------- | ----------- | :-----: |
-| -port | The port to start the server on | 27051 |
-| -max-players | The maximum number of players to allow on the server| 10 |
-| -password | The password for players to join the server | "" |
+| --port / -p | The port to start the server on | 27051 |
+| --max-players / -mp | The maximum number of players to allow on the server| 10 |
+| --password / -ps | The password for players to join the server | "" |
 
 ### Client:
 - These settings can be modified in the 'Modding/config/Multiplayer.cfg' file

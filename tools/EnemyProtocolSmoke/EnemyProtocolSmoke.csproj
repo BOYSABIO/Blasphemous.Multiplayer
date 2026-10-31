@@ -8,5 +8,6 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="..\..\Blasphemous.Multiplayer.Common\Blasphemous.Multiplayer.Common.csproj" />
+    <ProjectReference Include="..\..\Blasphemous.Multiplayer.Server\Blasphemous.Multiplayer.Server.csproj" />
   </ItemGroup>
 </Project>

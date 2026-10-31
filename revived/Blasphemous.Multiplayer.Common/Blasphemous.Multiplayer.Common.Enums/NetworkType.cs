@@ -1,0 +1,31 @@
+namespace Blasphemous.Multiplayer.Common.Enums
+{
+	public enum NetworkType
+	{
+		Position,
+		Animation,
+		Direction,
+		EnterScene,
+		LeaveScene,
+		Skin,
+		Team,
+		Connection,
+		Intro,
+		Progress,
+		Attack,
+		Effect,
+		Ping,
+		EnemySnapshot,
+		EnemyState,
+		EnemyDamage,
+		EnemyDeath,
+		EnemySyncRequest,
+		EnemyPlayerHit,
+		SessionEnemyHost,
+		SceneEnemyHost,
+		EnemyParried,
+		EnemySyncDone,
+		EnemyExecuted,
+		PlayerExecutionAnim
+	}
+}

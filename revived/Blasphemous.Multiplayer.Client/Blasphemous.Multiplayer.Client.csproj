@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net35</TargetFramework>
+    <AssemblyName>BlasClient</AssemblyName>
+    <RootNamespace>Blasphemous.Multiplayer.Client</RootNamespace>
+    <Title>Multiplayer</Title>
+    <Product>Multiplayer</Product>
+    <Description>Recovered protocol-16 Blasphemous multiplayer client.</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <PackageReference Include="Blasphemous.GameLibs" Version="[4.0.67]" />
+    <PackageReference Include="Blasphemous.ModdingAPI" Version="[3.0.0]" />
+    <PackageReference Include="Blasphemous.CheatConsole" Version="[1.1.0]" />
+    <ProjectReference Include="..\Blasphemous.Multiplayer.Common\Blasphemous.Multiplayer.Common.csproj" />
+    <Reference Include="SimpleTCP">
+      <HintPath>..\..\resources\data\SimpleTCP.dll</HintPath>
+    </Reference>
+  </ItemGroup>
+  <Target Name="GenerateModInfo" BeforeTargets="BeforeCompile">
+    <PropertyGroup>
+      <ModInfoSource>namespace Blasphemous.Multiplayer.Client { internal static class ModInfo { public const string MOD_ID = "Blasphemous.Multiplayer.Client"%3B public const string MOD_NAME = "Multiplayer"%3B public const string MOD_AUTHOR = "Damocles"%3B public const string MOD_VERSION = "$(Version)"%3B } }</ModInfoSource>
+    </PropertyGroup>
+    <WriteLinesToFile File="$(IntermediateOutputPath)ModInfo.Generated.cs" Lines="$(ModInfoSource)" Overwrite="true" WriteOnlyWhenDifferent="true" />
+    <ItemGroup>
+      <Compile Include="$(IntermediateOutputPath)ModInfo.Generated.cs" />
+    </ItemGroup>
+  </Target>
+</Project>

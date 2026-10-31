@@ -1,5 +1,7 @@
 ﻿using Blasphemous.Multiplayer.Common.Enums;
 using Blasphemous.Multiplayer.Server.Models;
+using Blasphemous.Multiplayer.Common;
+using Blasphemous.Multiplayer.Common.Combat;
 using SimpleTCP;
 using System;
 using System.Collections.Generic;
@@ -17,6 +19,8 @@ public class Server
     private Dictionary<string, PlayerInfo> connectedPlayers;
     /// <summary>Preferred enemy-AI host — first accepted connection (server operator if they join first).</summary>
     private string _sessionEnemyHostName = string.Empty;
+    private readonly Dictionary<string, PacketBuffer> _receiveBuffers = new();
+    private readonly object _receiveLock = new();
 
     public Server(int maxPlayers, string password)
     {
@@ -42,6 +46,9 @@ public class Server
 
     public bool Start(int port)
     {
+        connectedPlayers = new Dictionary<string, PlayerInfo>();
+        _receiveBuffers.Clear();
+        _sessionEnemyHostName = string.Empty;
         try
         {
             server = new SimpleTcpServer();
@@ -56,8 +63,6 @@ public class Server
             return false;
         }
 
-        connectedPlayers = new Dictionary<string, PlayerInfo>();
-        _sessionEnemyHostName = string.Empty;
         return true;
     }
 
@@ -83,19 +88,24 @@ public class Server
     // Data should be formatted as length length type data
     private void Receive(object sender, DataReceivedEventArgs e)
     {
-        int startIdx = 0;
-        while (startIdx < e.data.Length - 3)
+        lock (_receiveLock)
         {
-            ushort length = BitConverter.ToUInt16(e.data, startIdx);
-            NetworkType type = (NetworkType)e.data[startIdx + 2];
-            byte[] messageData = e.data[(startIdx + 3)..(startIdx + 3 + length)];
-
-            //Logger.Info($"Received {type} packet: {length} bytes");
-            processDataReceived(type, messageData);
-            startIdx += 3 + length;
+            if (!_receiveBuffers.TryGetValue(e.ip, out PacketBuffer buffer))
+                _receiveBuffers[e.ip] = buffer = new PacketBuffer();
+            buffer.Append(e.data);
+            while (buffer.TryRead(out NetworkType type, out byte[] messageData))
+            {
+                try
+                {
+                    if (type == NetworkType.Intro || connectedPlayers.ContainsKey(e.ip))
+                        processDataReceived(type, messageData);
+                }
+                catch (Exception ex)
+                {
+                    Logger.Warn($"Discarding invalid {type} packet: {ex.Message}");
+                }
+            }
         }
-        if (startIdx != e.data.Length)
-            Logger.Error("Received data was formatted incorrectly");
 
         // Determines which received function to call based on the type
         void processDataReceived(NetworkType type, byte[] data)
@@ -134,26 +144,30 @@ public class Server
 
     private void clientDisconnected(object sender, ClientConnectionEventArgs e)
     {
-        Logger.Info("Client disconnected at " + e.ip);
-
-        // Make sure this client was actually connected, not just rejected from server
-        if (!connectedPlayers.ContainsKey(e.ip))
-            return;
-
-        string leavingName = connectedPlayers[e.ip].name;
-
-        // Send that this player has disconnected & remove them
-        sendPlayerConnection(e.ip, false);
-        connectedPlayers.Remove(e.ip);
-        Core.removeUnusedGameData(connectedPlayers);
-
-        if (leavingName == _sessionEnemyHostName)
+        lock (_receiveLock)
         {
-            _sessionEnemyHostName = connectedPlayers.Count > 0
-                ? connectedPlayers.Values.First().name
-                : string.Empty;
-            BroadcastSessionEnemyHost();
-            Logger.Info($"Session enemy host left → now '{_sessionEnemyHostName}'");
+            _receiveBuffers.Remove(e.ip);
+            Logger.Info("Client disconnected at " + e.ip);
+
+            // Make sure this client was actually connected, not just rejected from server
+            if (!connectedPlayers.ContainsKey(e.ip))
+                return;
+
+            string leavingName = connectedPlayers[e.ip].name;
+
+            // Send that this player has disconnected & remove them
+            sendPlayerConnection(e.ip, false);
+            connectedPlayers.Remove(e.ip);
+            Core.removeUnusedGameData(connectedPlayers);
+
+            if (leavingName == _sessionEnemyHostName)
+            {
+                _sessionEnemyHostName = connectedPlayers.Count > 0
+                    ? connectedPlayers.Values.First().name
+                    : string.Empty;
+                BroadcastSessionEnemyHost();
+                Logger.Info($"Session enemy host left → now '{_sessionEnemyHostName}'");
+            }
         }
     }
 
@@ -776,11 +790,20 @@ public class Server
     private void ReceiveEnemyRelay(string playerIp, byte[] data, NetworkType type)
     {
         PlayerInfo current = getCurrentPlayer(playerIp);
+        if (string.IsNullOrEmpty(current.sceneName))
+            return;
+        string host = EnemyAuthority.Resolve(connectedPlayers.Values
+            .Where(player => current.isInSameScene(player)).Select(player => player.name), _sessionEnemyHostName);
+        bool fromHost = current.name == host;
+        if ((type == NetworkType.EnemySnapshot || type == NetworkType.EnemyState
+            || type == NetworkType.EnemyDeath || type == NetworkType.EnemyPlayerHit) && !fromHost)
+            return;
         byte[] packet = GetNamedPacket(current, data);
 
         foreach (string ip in connectedPlayers.Keys)
         {
-            if (playerIp != ip && current.isInSameScene(connectedPlayers[ip]))
+            if (playerIp != ip && current.isInSameScene(connectedPlayers[ip])
+                && (type != NetworkType.EnemyDamage && type != NetworkType.EnemySyncRequest || connectedPlayers[ip].name == host))
                 Send(ip, packet, type);
         }
     }
@@ -792,5 +815,5 @@ public class Server
         return bytes.ToArray();
     }
 
-    private const byte PROTOCOL_VERSION = 12;
+    private const byte PROTOCOL_VERSION = Protocol.VERSION;
 }

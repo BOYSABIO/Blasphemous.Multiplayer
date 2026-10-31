@@ -1,4 +1,4 @@
-# Blasphemous Multiplayer
+﻿# Blasphemous Multiplayer
 
 <img src="https://img.shields.io/github/downloads/BrandenEK/Blasphemous.Multiplayer/total?color=39B7C6&style=for-the-badge">
 
@@ -28,11 +28,11 @@
 - All world state progress (Bosses defeated / Gates opened / Cherubs freed / Teleports unlocked / Questline progress / etc. )
 - Church donation amount
 
-### Things that will probably never sync
-- Bosses (phases, arenas, and cutscenes — still out of scope)
-
-### Experimental (this fork)
-- **Room enemies** — host-authoritative position / HP / death in the same scene (protocol v4). Bosses are still excluded.
+### Experimental cooperative combat (this fork)
+- **Room enemies** — one scene host runs AI; clients share hits, health, death, position and animation.
+- **Bosses** — shared host-authoritative health and damage. Boss AI, attacks, arenas and cutscenes run locally on each client, so attacks and positions can differ between screens. Complete encounter synchronization is not implemented.
+- Version **2.4.2**, protocol **13**: update the server and every client together.
+- See [installation and testing](ENEMY_SYNC_SMOKE.md) for packages, automated checks and the two-player checklist.
 
 ## PvP
 PvP is now available in Blasphemous Multiplayer, but only for sword attacks right now (Prayers other than Debla do nothing).  To fight other players, make sure you are on a different team than them or enable friendly fire

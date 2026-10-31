@@ -2,6 +2,7 @@
 using Blasphemous.Multiplayer.Server.Models;
 using System;
 using System.Collections.Generic;
+using System.Diagnostics.CodeAnalysis;
 
 namespace Blasphemous.Multiplayer.Server;
 
@@ -20,6 +21,8 @@ internal static class Core
         }
     }
 
+    // The command parser assigns these properties through reflection in trimmed builds.
+    [DynamicDependency(DynamicallyAccessedMemberTypes.PublicProperties, typeof(ServerArguments))]
     static void Main(string[] args)
     {
         // Title
