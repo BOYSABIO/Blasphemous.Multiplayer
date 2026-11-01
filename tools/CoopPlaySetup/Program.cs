@@ -20,6 +20,12 @@ internal static class Program
     {
         try
         {
+            if (args.Length == 2 && args[0] == "--check-dependencies")
+            {
+                _ = DependencyBundle.Read(args[1]);
+                Console.WriteLine("Dependency bundle verified: four pinned official components and required notices.");
+                return 0;
+            }
             var options = Parse(args);
             if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("This player-copy builder supports the verified Windows build only.");
             var source = Path.GetFullPath(options["--game-directory"]).TrimEnd(Path.DirectorySeparatorChar);

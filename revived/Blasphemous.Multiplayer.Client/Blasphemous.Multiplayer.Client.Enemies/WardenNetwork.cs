@@ -22,6 +22,7 @@ internal static class WardenNetwork
         public BossHazardData Data;
         public bool Replica;
         public bool PromotedReplica;
+        public bool EndingResumed;
         public readonly Dictionary<Collider2D, bool> Colliders = new Dictionary<Collider2D, bool>();
         public uint ReceivedTerm, ReceivedSequence;
     }
@@ -44,6 +45,9 @@ internal static class WardenNetwork
     private static readonly Queue<ulong> RetiredOrder = new Queue<ulong>();
     private static readonly Dictionary<int, Entry> ByInstance = new Dictionary<int, Entry>();
     private static readonly Dictionary<int, BossEncounterState> EncounterStates = new Dictionary<int, BossEncounterState>();
+    private static readonly HashSet<int> FinishedEncounters = new HashSet<int>();
+    private static readonly Dictionary<int, PlayMakerFSM> NativeEncounterFsms = new Dictionary<int, PlayMakerFSM>();
+    private static readonly HashSet<int> MissingNativeFsmLogged = new HashSet<int>();
     private static readonly Dictionary<int, BossEncounterData> PendingEncounters = new Dictionary<int, BossEncounterData>();
     private static readonly Dictionary<ulong, DeferredHazard> PendingHazards = new Dictionary<ulong, DeferredHazard>();
     private static uint _sequence, _hazardCounter, _receiveTerm, _receiveSequence, _observedTerm, _emittedTerm;
@@ -64,7 +68,7 @@ internal static class WardenNetwork
     public static void Clear()
     {
         foreach (Entry entry in Hazards.Values.ToArray()) if (entry.Replica) RecycleReplica(entry);
-        Hazards.Clear(); ByInstance.Clear(); RetiredHazards.Clear(); RetiredOrder.Clear(); Pending.Clear(); EncounterStates.Clear(); PendingEncounters.Clear(); PendingHazards.Clear();
+        Hazards.Clear(); ByInstance.Clear(); RetiredHazards.Clear(); RetiredOrder.Clear(); Pending.Clear(); EncounterStates.Clear(); FinishedEncounters.Clear(); NativeEncounterFsms.Clear(); MissingNativeFsmLogged.Clear(); PendingEncounters.Clear(); PendingHazards.Clear();
         _clockKnown = false; _receiveTerm = 0; _receiveSequence = 0; _observedTerm = 0; _emittedTerm = 0; _sendAt = 0;
     }
 
@@ -116,12 +120,24 @@ internal static class WardenNetwork
         foreach (Entry entry in Hazards.Values.ToArray())
         {
             if (entry.Area == null || !entry.Area.gameObject.activeInHierarchy) SendInactive(entry);
-            else if (entry.PromotedReplica && Convert.ToByte(Stage.GetValue(entry.Area)) == 2 && entry.Area.Animator != null
-                && !entry.Area.Animator.GetCurrentAnimatorStateInfo(0).loop && entry.Area.Animator.GetCurrentAnimatorStateInfo(0).normalizedTime >= 1f)
+            else if (entry.PromotedReplica && Convert.ToByte(Stage.GetValue(entry.Area)) == 2 && entry.Area.Animator != null)
             {
-                // A replica may already have consumed its end-animation event
-                // while recycling was suppressed. Promotion must finish it.
-                SendInactive(entry); RecycleReplica(entry);
+                AnimatorStateInfo animation = entry.Area.Animator.GetCurrentAnimatorStateInfo(0);
+                if (animation.loop && !entry.EndingResumed)
+                {
+                    // Replication can advance the native stage before its END
+                    // trigger/transition arrives. OnUpdate has no ENDING case,
+                    // so promotion must finish that authored transition once.
+                    entry.EndingResumed = true;
+                    entry.Area.Animator.SetTrigger("END");
+                }
+                if (!animation.loop && animation.normalizedTime >= 1f)
+                {
+                    // The end event may already have run while recycling was
+                    // suppressed on the replica.
+                    SendInactive(entry); RecycleReplica(entry);
+                }
+                else SendHazard(entry);
             }
             else SendHazard(entry);
         }
@@ -136,6 +152,7 @@ internal static class WardenNetwork
     {
         if (_emittedTerm != Manager.HostTerm) { EncounterStates.Clear(); _emittedTerm = Manager.HostTerm; }
         int key = EnemyManager.ComputeStableNetId(warden);
+        if (state == BossEncounterState.Finished) RememberFinished(key);
         if (EncounterStates.TryGetValue(key, out var previous) && previous == state) return;
         EncounterStates[key] = state;
         Main.Multiplayer.NetworkManager.SendBossPacket(BossSyncCodec.EncodeEncounter(new BossEncounterData {
@@ -158,7 +175,18 @@ internal static class WardenNetwork
             if (!ApplyHazard(hazard) && (PendingHazards.ContainsKey(hazard.Id) || PendingHazards.Count < BossSyncCodec.MaxHazards))
                 PendingHazards[hazard.Id] = new DeferredHazard { Data = hazard, ReceivedAt = Time.time };
         }
-        else if (!ApplyEncounter(encounter) && (PendingEncounters.ContainsKey(encounter.SpawnKey) || PendingEncounters.Count < BossSyncCodec.MaxEncounters)) PendingEncounters[encounter.SpawnKey] = encounter;
+        else
+        {
+            if (encounter.State == BossEncounterState.Finished) RememberFinished(encounter.SpawnKey);
+            else if (FinishedEncounters.Contains(encounter.SpawnKey)) return;
+            if (!ApplyEncounter(encounter) && (PendingEncounters.ContainsKey(encounter.SpawnKey) || PendingEncounters.Count < BossSyncCodec.MaxEncounters))
+                PendingEncounters[encounter.SpawnKey] = encounter;
+        }
+    }
+
+    private static void RememberFinished(int spawnKey)
+    {
+        if (FinishedEncounters.Count < BossSyncCodec.MaxEncounters) FinishedEncounters.Add(spawnKey);
     }
 
     private static ElderBrother FindWarden(int spawnKey)
@@ -167,21 +195,77 @@ internal static class WardenNetwork
             if (EnemyManager.ComputeStableNetId(warden) == spawnKey) return warden;
         return null;
     }
+
+    internal static bool EnsureNativeEncounterReady(ElderBrother warden)
+    {
+        if (!Connected || warden == null || warden.Dead) return true;
+        BossFightManager fight = UnityEngine.Object.FindObjectsOfType<BossFightManager>().FirstOrDefault(candidate => candidate.Boss == warden);
+        if (fight == null) return false;
+        if (Core.LevelManager.currentLevel.LevelName != "D17Z01S11")
+        {
+            // Other Warden arenas retain their existing manager-based start.
+            if (!fight.IsFightStarted) ReplayNativeStart(() => fight.StartBossFight());
+            return fight.IsFightStarted;
+        }
+
+        int key = fight.GetInstanceID();
+        if (!NativeEncounterFsms.TryGetValue(key, out var fsm) || fsm == null)
+        {
+            foreach (PlayMakerFSM candidate in fight.GetComponents<PlayMakerFSM>())
+            {
+                var combat = candidate.Fsm.GetState("Start Combat");
+                var listener = candidate.Fsm.GetState("Is Boss Dead?");
+                if (combat == null || listener == null) continue;
+                bool startsThisFight = combat.Actions.OfType<HutongGames.PlayMaker.Actions.CallMethod>()
+                    .Any(action => action.methodName.Value == "StartBossFight" && action.behaviour.Value == fight);
+                if (!startsThisFight || !listener.Actions.Any(action => action is Tools.Playmaker2.Events.EntityDead)) continue;
+                fsm = candidate;
+                if (NativeEncounterFsms.Count < BossSyncCodec.MaxEncounters) NativeEncounterFsms[key] = fsm;
+                break;
+            }
+        }
+        if (fsm == null)
+        {
+            if (MissingNativeFsmLogged.Count < BossSyncCodec.MaxEncounters && MissingNativeFsmLogged.Add(key))
+                ModLog.Warn("[WardenEncounter] Waiting for the verified native story encounter FSM");
+            return false;
+        }
+
+        string state = fsm.ActiveStateName;
+        if (state == "Is Boss Dead?") return true;
+        // Let level-ready/ambience initialization finish first. Never restart
+        // the combat listener or any native completion/cutscene state.
+        if (state != "Wait For Player" && state != "Is Penitent?" && state != "Wait a second (Input Block)"
+            && state != "TRIGGER INTRO" && state != "Wait before combat starts") return false;
+        ReplayNativeStart(() => fsm.SetState("Start Combat"));
+        ModLog.Info("[WardenEncounter] Applied native story FSM start actor=" + EnemyManager.ComputeStableNetId(warden));
+        return fsm.ActiveStateName == "Is Boss Dead?";
+    }
+
+    private static void ReplayNativeStart(Action start)
+    {
+        bool previous = ReplayingEncounter; ReplayingEncounter = true;
+        try { start(); }
+        finally { ReplayingEncounter = previous; }
+    }
+
     private static bool ApplyEncounter(BossEncounterData data)
     {
         ElderBrother warden = FindWarden(data.SpawnKey);
         if (warden == null) return false;
         BossFightManager fight = UnityEngine.Object.FindObjectsOfType<BossFightManager>().FirstOrDefault(candidate => candidate.Boss == warden);
         if (fight == null) return false;
+        // Cached replay has sequence zero and can arrive after a newer live
+        // finish. Death is terminal for this actor until the level is cleared,
+        // including when native death must be deferred for a dead local player.
+        if (data.State == BossEncounterState.Finished)
+        {
+            RememberFinished(data.SpawnKey);
+        }
+        else if (warden.Dead || FinishedEncounters.Contains(data.SpawnKey)) return true;
         if (data.State == BossEncounterState.Started)
         {
-            if (!fight.IsFightStarted)
-            {
-                ReplayingEncounter = true;
-                try { fight.StartBossFight(); }
-                finally { ReplayingEncounter = false; }
-                ModLog.Info($"[WardenEncounter] Applied native start actor={data.SpawnKey}");
-            }
+            if (!EnsureNativeEncounterReady(warden)) return false;
             // The host's dummy has left the camera by this point. Complete only
             // its presentation on replicas, preserving arena objects/events.
             foreach (ElderBrotherIntroDummy dummy in UnityEngine.Object.FindObjectsOfType<ElderBrotherIntroDummy>())
@@ -320,7 +404,7 @@ internal static class WardenNetwork
     }
     private static void SetReplica(Entry entry, bool replica)
     {
-        if (!replica && entry.Replica) entry.PromotedReplica = true;
+        if (!replica && entry.Replica) { entry.PromotedReplica = true; entry.EndingResumed = false; }
         if (entry.Colliders.Count == 0 && entry.Area != null)
             foreach (Collider2D collider in entry.Area.GetComponentsInChildren<Collider2D>(true)) entry.Colliders[collider] = collider.enabled;
         foreach (var state in entry.Colliders) if (state.Key != null) state.Key.enabled = replica ? false : state.Value;

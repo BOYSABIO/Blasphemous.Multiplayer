@@ -6,20 +6,26 @@ full-campaign co-op is unsupported. Gameplay verification is still in progress.
 The scripts below accept the matching server folder; they do not select or
 install an older build automatically.
 
-Every player needs an owned game copy, the same client package, Modding API and
-Cheat Console. The host also needs the matching server. Keep co-op testing in
+Every player needs an owned game copy and the same client package. The package
+can include the pinned official loader, Modding API and Cheat Console dependencies
+for a clean game installation. The host also needs the matching server. Keep co-op testing in
 isolated game/save copies; the normal install and saves remain unchanged.
 
 Prepare each player's separate copy using the package's self-contained
 `Setup.exe` builder and `payload-manifest.json`:
 
 ```powershell
-.\Setup.exe --game-directory '<owned game directory with prerequisites>' `
-  --destination '<new co-op directory>' --payload-manifest .\payload-manifest.json
+.\Setup.exe --game-directory '<owned game directory>' `
+  --destination '<new co-op directory>' --payload-manifest .\payload-manifest.json `
+  --dependency-manifest .\dependencies\dependencies.json
 ```
 
-The builder checks the supported game identity, base loader, Modding API,
-Console and payload hashes before copying; see
+The optional dependency manifest installs the four pinned official components
+only into the new physical copy. Their license notices and corresponding source
+are included. If a package omits that bundle, use a separate source copy with the
+prerequisites already installed and omit `--dependency-manifest`.
+
+The builder checks the supported game identity, dependencies and payload hashes before copying; see
 [player-copy setup](../tools/CoopPlaySetup/README.md) for prerequisites and limits.
 Then launch `Play-Coop.cmd` inside that new copy. Its saves are in `saves/` under
 the copy. Keep Steam running with the owned game. Each PC supplies its own game;
@@ -141,7 +147,8 @@ local candidate folder:
   -ClientBuildDirectory '<matching client bin/Release/net35>' `
   -ServerDirectory '<self-contained server with coop-release.json>' `
   -SetupExecutable '<self-contained CoopPlaySetup.exe>' `
-  -OutputDirectory '<new candidate directory>'
+  -OutputDirectory '<new candidate directory>' `
+  -DependencyManifest '<pinned bundle>/dependencies.json'
 ```
 
 The builder checks numeric client/common/server versions, protocol 17 and the
@@ -150,6 +157,12 @@ server hash before writing anything. It selects exactly seven mod files for
 references are excluded even when present in the input directory. ZIP entry
 order and timestamps are fixed. It copies the server and setup executables,
 host/join helpers and license, then records their SHA-256 values.
+
+`-DependencyManifest` is optional. When supplied, the packager first calls the
+shipped setup executable's read-only `--check-dependencies` validator. It then
+copies the manifest, four official assets, license notices and corresponding
+source into `dependencies/`, verifying every copied hash. Invalid bundles are
+rejected before package output is created.
 
 The generated README identifies the Warden adapter as experimental and says
 that other bosses remain excluded and full-campaign co-op is unsupported. Both

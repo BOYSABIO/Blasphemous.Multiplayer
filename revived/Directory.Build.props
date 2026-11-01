@@ -8,4 +8,9 @@
     <Company>Damocles</Company>
     <RepositoryUrl>https://github.com/BOYSABIO/Blasphemous.Multiplayer</RepositoryUrl>
   </PropertyGroup>
+  <PropertyGroup Condition="'$(Configuration)' == 'Release'">
+    <DebugType>none</DebugType>
+    <DebugSymbols>false</DebugSymbols>
+    <PathMap>$(MSBuildProjectDirectory)=/_/$(MSBuildProjectName)</PathMap>
+  </PropertyGroup>
 </Project>

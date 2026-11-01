@@ -16,6 +16,13 @@ internal sealed class DependencyBundle
         ["api"] = new("B74FE3900B563483D090FD7F01939FE7D60BA5711E83D7996396A274E7156FF7", "https://github.com/BrandenEK/Blasphemous.ModdingAPI/releases/download/3.0.1/ModdingAPI.zip", "ModdingAPI", new(3,0,1,0), "plugins/ModdingAPI.dll"),
         ["console"] = new("2280E5B4FD82A88395AAE5F841A4B64C47CF24A22C0603F02EFB220662067DB8", "https://github.com/BrandenEK/Blasphemous.CheatConsole/releases/download/1.1.0/CheatConsole.zip", "CheatConsole", new(1,1,0,0), "plugins/CheatConsole.dll")
     };
+    static readonly Dictionary<string, (string Sha256, string Url)> NoticePins = new(StringComparer.Ordinal) {
+        ["BepInEx-LICENSE.txt"] = ("E6E534EF6F4347B6449407EE046A3D09CB0174C6F688C996AD0BED94B74B3933", "https://raw.githubusercontent.com/BepInEx/BepInEx/v5.4.21/LICENSE"),
+        ["MultiFolderLoader-LICENSE.txt"] = ("00DE20316BB5F2B227A7219384785E0970AB0C800DAF374C1962E370C33497DE", "https://raw.githubusercontent.com/BepInEx/BepInEx.MultiFolderLoader/v1.3.1/LICENSE"),
+        ["ModdingAPI-LICENSE.md"] = ("436CAB80543D96500519E67477D0EC36530CC6B7F8F076333386D8030EE099C6", "https://raw.githubusercontent.com/BrandenEK/Blasphemous.ModdingAPI/3.0.1/docs/LICENSE.md"),
+        ["CheatConsole-LICENSE.md"] = ("D02BBE8E956B5A4F39CAEE418474210B5F4E13D37F203D4B543ABCAA1170BA7B", "https://raw.githubusercontent.com/BrandenEK/Blasphemous.CheatConsole/1.1.0/docs/LICENSE.md"),
+        ["BepInEx-5.4.21-source.zip"] = ("62F4EEF48415E96F08778F939B10D6ACDC8744AB217518DB608D89DBAF15F08A", "https://github.com/BepInEx/BepInEx/archive/refs/tags/v5.4.21.zip")
+    };
     readonly List<Asset> assets = new();
     readonly List<Notice> notices = new();
     public object Identity => assets.Select(a => new { id = a.Id, sha256 = a.Pin.Sha256, url = a.Pin.Url }).ToArray();
@@ -53,15 +60,13 @@ internal sealed class DependencyBundle
             string relative = item.GetProperty("file").GetString()!;
             if (!noticeNames.Add(relative)) throw new InvalidDataException("Duplicate dependency notice.");
             string path = RelativeFile(manifest, relative), sha = item.GetProperty("sha256").GetString()!.ToUpperInvariant();
-            if (!(relative.EndsWith(".txt", StringComparison.OrdinalIgnoreCase) || relative.EndsWith(".md", StringComparison.OrdinalIgnoreCase) || relative.EndsWith("-source.zip", StringComparison.OrdinalIgnoreCase)))
-                throw new InvalidDataException("Only license documents and corresponding source archives belong in dependency notices.");
             string url = item.GetProperty("url").GetString()!;
-            if (!Uri.TryCreate(url, UriKind.Absolute, out var parsed) || parsed.Scheme != "https" || !(parsed.Host is "github.com" or "raw.githubusercontent.com"))
-                throw new InvalidDataException("Dependency notices need an official GitHub provenance URL.");
+            if (!NoticePins.TryGetValue(relative, out var pin) || sha != pin.Sha256 || url != pin.Url)
+                throw new InvalidDataException("Dependency notice differs from the pinned release provenance: " + relative);
             using (Verified(path, sha)) { }
             bundle.notices.Add(new(path, relative, sha, url));
         }
-        foreach (var required in new[] { "BepInEx-LICENSE.txt", "MultiFolderLoader-LICENSE.txt", "ModdingAPI-LICENSE.md", "CheatConsole-LICENSE.md", "BepInEx-5.4.21-source.zip" })
+        foreach (var required in NoticePins.Keys)
             if (!noticeNames.Contains(required)) throw new InvalidDataException("Missing dependency license/source notice: " + required);
         return bundle;
     }

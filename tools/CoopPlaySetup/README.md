@@ -19,7 +19,7 @@ The manifest selects the actual client build rather than assuming a protocol:
   "schemaVersion": 1,
   "clientArchive": "BlasClient.zip",
   "clientSha256": "<64 hexadecimal SHA-256 characters>",
-  "clientVersion": "2.8.4",
+  "clientVersion": "2.9.0.0",
   "protocol": 17
 }
 ```
@@ -45,15 +45,47 @@ local/tools/dotnet/dotnet.exe publish tools/CoopPlaySetup -c Release -r win-x64 
 ```
 
 Ship the generated `CoopPlaySetup.exe` with the payload manifest and client archive.
-Players run it with the same three options shown above; a separate .NET install
-is unnecessary. The owned game and base mod-loader prerequisites are still needed.
+A separate .NET installation is unnecessary. A prepared dependency bundle also
+supports an unmodded owned game:
 
-The source needs BepInEx 5, Modding API >=3.0.0, Cheat Console >=1.1.0 and the
-MultiFolderLoader patcher. A clean install fails before copying, with the
+```powershell
+CoopPlaySetup.exe --game-directory '<owned game directory>' `
+  --destination '<new co-op directory>' `
+  --payload-manifest '<package>/payload-manifest.json' `
+  --dependency-manifest '<package>/dependencies/dependencies.json'
+```
+
+The optional bundle pins BepInEx 5.4.21 x64, MultiFolderLoader 1.3.1, Modding API
+3.0.1 and Cheat Console 1.1.0 to official release URLs and SHA-256 digests. Setup
+checks every digest, managed assembly identity, archive path and required notice
+before creating the destination. It extracts these components only into the new
+physical copy. It does not execute an installer, download files or import the
+source's existing mods, configuration, logs or saves.
+
+Without `--dependency-manifest`, the source must already have BepInEx 5, Modding
+API >=3.0.0, Cheat Console >=1.1.0 and MultiFolderLoader. Missing prerequisites
+fail before copying, with the
 [official installer link](https://github.com/BrandenEK/Blasphemous.Modding.Installer).
-Prepare those prerequisites in a separate source copy. This tool does not silently
-download or run an unpinned installer. Existing source mods/configurations/logs
-are not propagated: only the game runtime, base loader, API and Console are copied.
+
+Package maintainers prepare the pinned bundle with:
+
+```powershell
+./tools/CoopPlaySetup/Prepare-CoopDependencies.ps1 -OutputDirectory '<new bundle directory>'
+```
+
+The preparer downloads only its nine pinned release assets, license notices and
+corresponding source archive. `-AssetDirectory '<verified cache>'` copies and
+checks the same inputs offline. Its output is `dependencies.json` plus the named
+files. Existing nonempty outputs are refused. For package acceptance,
+`CoopPlaySetup.exe --check-dependencies '<bundle>/dependencies.json'` runs the
+production bundle validator without creating a game copy.
+
+The dependency manifest has schema version 1 and `assets` entries containing
+`id`, `file`, `sha256`, and `url`; `notices` omit `id`. Paths are relative to the
+manifest. Exact pins and required notices are recorded in
+`Prepare-CoopDependencies.ps1` and enforced by `DependencyBundle.cs`. Release-tag
+license texts and source provenance travel with the bundle; the pinned BepInEx
+5.4.21 tag's own license is MIT.
 
 The new copy has:
 

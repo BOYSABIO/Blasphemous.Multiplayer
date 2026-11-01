@@ -91,7 +91,7 @@ def main() -> int:
         for g in bridges:
             s = g.state()
             if not s["inLevel"]:
-                g.call("bot.newgame")
+                wait("native campaign menu ready", lambda: g.call("bot.newgame"), lambda s: s["accepted"], timeout=30)
                 wait("slot selection", lambda: g.call("bot.selectslot"), lambda s: s["accepted"], timeout=20)
                 wait("new-game scene", g.state, lambda s: s["inLevel"], timeout=60)
         # Official Randomizer locations BS13 / BS01 provide the story rooms.
@@ -120,6 +120,13 @@ def main() -> int:
             return 0
 
         if args.scenario in ("warden", "piety"):
+            if args.scenario == "warden":
+                # The authored arena listens for TriggerEnter only after its
+                # ambience setup. Entering earlier loses the native event.
+                wait("native Warden arena triggers ready", lambda: snapshot("arena-ready-wait"),
+                     lambda ss: all(any(f["gameObject"] == "BossFight" and f["name"] == "FSM"
+                                        and f["state"] == "Wait For Player" for f in s["fsms"])
+                                    or any(f["started"] for f in s["bossFights"]) for s in ss), timeout=20)
             for i, g in enumerate(bridges):
                 g.call("bot.heal")
                 if args.scenario == "warden":
@@ -128,7 +135,7 @@ def main() -> int:
                     check(len(wardens) == 1 and wardens[0]["id"] == "BS13", f"slot {i} contains the actual Warden actor")
                     # Warden has no authored BossFight.SpawnPoint. Enter the
                     # arena trigger on its ground, as a player normally would.
-                    g.call("bot.teleport", {"x": wardens[0]["position"]["x"] + (-4 if i == 0 else 4),
+                    g.call("bot.teleport", {"x": -811.7 if i == 0 else wardens[0]["position"]["x"] + 4,
                                              "y": s["player"]["position"]["y"]})
                 else:
                     g.call("bot.bossstart")
@@ -258,6 +265,8 @@ def main() -> int:
                           lambda ss: all((boss(s) is None or boss(s)["dead"])
                                          and not any(f["started"] for f in s["bossFights"]) for s in ss), timeout=20)
             check(True, "guest lethal hit ends both native boss fights")
+            states = wait("native Warden progression flags", lambda: safe_states("boss-flags-wait"),
+                          lambda ss: all(s["wardenDefeated"] or s["wardenRoomDefeated"] for s in ss), timeout=12)
             check(all(s["wardenDefeated"] or s["wardenRoomDefeated"] for s in states),
                   "both games record the native Warden defeat flag")
         if args.scenario in ("death", "migration"):

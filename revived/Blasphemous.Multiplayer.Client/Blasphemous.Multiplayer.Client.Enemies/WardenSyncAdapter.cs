@@ -191,6 +191,10 @@ internal sealed class WardenSyncAdapter
             return false;
         }
         _warnedDeathBlocked = false;
+        // Native story progression listens to Entity.Death from its FSM state.
+        // A late join/death packet can precede scene/FSM readiness; keep it in
+        // the existing pending-death queue until the native listener is active.
+        if (!WardenNetwork.EnsureNativeEncounterReady(_enemy)) return false;
         if (_enemy.Animator != null) { _enemy.Animator.enabled = true; _enemy.Animator.fireEvents = _fireEvents; }
         ((IDamageable)_enemy).Damage(new Hit
         {

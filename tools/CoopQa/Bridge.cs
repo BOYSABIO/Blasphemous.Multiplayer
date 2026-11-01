@@ -224,6 +224,27 @@ public sealed class Bridge : BaseUnityPlugin
     static float Number(JObject p, string key, float fallback = 0) => (float?)p[key] ?? fallback;
     static object Position(Transform t) => t == null ? null : new { x = t.position.x, y = t.position.y, z = t.position.z };
 
+    static object[] EventCallbacks(object value)
+    {
+        var evt = value as UnityEngine.Events.UnityEventBase;
+        if (evt == null) return new object[0];
+        return Enumerable.Range(0, evt.GetPersistentEventCount()).Select(i => {
+            var target = evt.GetPersistentTarget(i);
+            return (object)new { target = target == null ? null : target.name,
+                type = target == null ? null : target.GetType().FullName, method = evt.GetPersistentMethodName(i) };
+        }).ToArray();
+    }
+
+    static object[] FsmState()
+    {
+        var type = AppDomain.CurrentDomain.GetAssemblies().Select(a => a.GetType("PlayMakerFSM")).FirstOrDefault(t => t != null);
+        if (type == null) return new object[0];
+        return UObject.FindObjectsOfType(type).Select(fsm => (object)new {
+            instance = fsm.GetInstanceID(), gameObject = (fsm as Component)?.gameObject.name,
+            name = Read(fsm, "FsmName"), state = Read(fsm, "ActiveStateName"), enabled = (fsm as Behaviour)?.enabled
+        }).ToArray();
+    }
+
     static object[] HazardState()
     {
         var type = Multiplayer?.GetType().Assembly.GetType("Blasphemous.Multiplayer.Client.Enemies.WardenNetwork");
@@ -254,8 +275,13 @@ public sealed class Bridge : BaseUnityPlugin
     {
         var multiplayer = Multiplayer;
         var manager = Read(multiplayer, "EnemyManager");
+        var tracked = Read(manager, "_enemies") as IDictionary;
+        var records = tracked == null ? new object[0] : tracked.Values.Cast<object>().ToArray();
+        Func<Enemy, object> syncInfo = enemy => records.FirstOrDefault(record => (Read(record, "Enemy") as Enemy) == enemy);
         var enemies = UObject.FindObjectsOfType<Enemy>().Select(enemy => new {
             instance = enemy.GetInstanceID(), id = enemy.Id, type = enemy.GetType().FullName,
+            syncSequence = Read(syncInfo(enemy), "LastSequence"), syncNetId = Read(syncInfo(enemy), "NetId"),
+            syncSpawnKey = Read(syncInfo(enemy), "SpawnKey"), syncGeneration = Read(syncInfo(enemy), "Generation"),
             position = Position(enemy.transform), life = enemy.CurrentLife, maximumLife = enemy.Stats.Life.Base, dead = enemy.Dead,
             active = enemy.gameObject.activeInHierarchy,
             ai = enemy.GetComponent<Gameplay.GameControllers.Enemies.Framework.IA.EnemyBehaviour>()?.enabled,
@@ -271,6 +297,7 @@ public sealed class Bridge : BaseUnityPlugin
         var player = Core.Logic?.Penitent;
         var roster = Read(Read(multiplayer, "OtherPlayerManager"), "AllConnectedPlayers") as IEnumerable;
         var names = roster == null ? new string[0] : roster.Cast<object>().Select(p => (string)Read(p, "Name")).ToArray();
+        var mainMenu = Find("Gameplay.UI.Others.MenuLogic.NewMainMenu");
         return new {
             pid = processId, frames = Interlocked.Read(ref frames), scene = SceneManager.GetActiveScene().name,
             level = Read(Read(Core.LevelManager, "currentLevel"), "LevelName"),
@@ -284,16 +311,21 @@ public sealed class Bridge : BaseUnityPlugin
             enemies,
             bossFights = UObject.FindObjectsOfType<Gameplay.GameControllers.Bosses.BossFight.BossFightManager>()
                 .Select(f => new { id = f.Boss == null ? null : f.Boss.Id, started = f.IsFightStarted, phase = f.CurrentBossPhaseId,
+                    finishCallbacks = EventCallbacks(Read(f, "onFinishBossFight")),
                     phases = f.Phases == null ? new object[0] : f.Phases.Select(phase => (object)new {
                         id = phase.Id, minimum = phase.PhaseInterval.x, maximum = phase.PhaseInterval.y }).ToArray() }).ToArray(),
             timeScale = Time.timeScale, gameTime = Time.time,
+            inputBlocked = Core.Input != null && Core.Input.InputBlocked,
+            inputBlockers = (Read(Core.Input, "inputBlockers") as IEnumerable)?.Cast<object>().Select(x => x.ToString()).ToArray(),
             wardenHazards = HazardState(),
             wardenIntroDummy = Position((Find("ElderBrotherIntroDummy") as Component)?.transform),
             wardenIntroVisible = (Find("ElderBrotherIntroDummy") as Component)?.GetComponentsInChildren<Renderer>(true)
                 .Any(r => r.enabled && r.gameObject.activeInHierarchy),
             wardenDefeated = Core.Events != null && Core.Events.GetFlag("D17Z01_BOSSDEAD"),
             wardenRoomDefeated = Core.Events != null && Core.Events.GetFlag("D17Z01S11_BOSSDEAD"),
-            menu = new { main = Find("Gameplay.UI.Others.MenuLogic.NewMainMenu") != null }
+            fsms = FsmState(),
+            menu = new { main = mainMenu != null, state = Read(mainMenu, "currentState")?.ToString(),
+                slotsShowing = Read(Read(mainMenu, "selectSaveSlotsWidget"), "IsShowing") }
         };
     }
 
@@ -316,8 +348,11 @@ public sealed class Bridge : BaseUnityPlugin
                 Time.timeScale = 1;
                 return new { accepted = true, state = "activated preloaded menu" };
             case "bot.newgame":
-                Call(Find("Gameplay.UI.Others.MenuLogic.NewMainMenu"), "OptionCampain");
-                return new { accepted = true };
+                var menu = Find("Gameplay.UI.Others.MenuLogic.NewMainMenu");
+                string menuState = Read(menu, "currentState")?.ToString();
+                if (menuState != "MENU") return new { accepted = false, state = menuState ?? "not ready" };
+                Call(menu, "OptionCampain");
+                return new { accepted = (bool)(Read(Read(menu, "selectSaveSlotsWidget"), "IsShowing") ?? false), state = "campaign slots" };
             case "bot.selectslot":
                 // Find by simple name as namespace differs between game versions.
                 Type slotType = typeof(Enemy).Assembly.GetTypes().First(t => t.Name == "SelectSaveSlots");

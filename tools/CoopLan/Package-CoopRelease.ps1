@@ -3,7 +3,8 @@ param(
     [Parameter(Mandatory = $true)][string]$ClientBuildDirectory,
     [Parameter(Mandatory = $true)][string]$ServerDirectory,
     [Parameter(Mandatory = $true)][string]$SetupExecutable,
-    [Parameter(Mandatory = $true)][string]$OutputDirectory
+    [Parameter(Mandatory = $true)][string]$OutputDirectory,
+    [string]$DependencyManifest
 )
 
 $ErrorActionPreference = 'Stop'
@@ -110,6 +111,30 @@ $packageFiles = [ordered]@{
     'tools/CoopLan/Join-CoopLan.ps1' = Require-File (Join-Path $PSScriptRoot 'Join-CoopLan.ps1')
     'LICENSE.md' = Require-File (Join-Path $repository 'revived\LICENSE.md')
 }
+if ($DependencyManifest) {
+    $dependencyPath = Require-File $DependencyManifest
+    $dependencyRoot = Split-Path -Parent $dependencyPath
+    # Use the exact installer that ships in this package to validate official
+    # pins and archive identities. It performs no copy or installation here.
+    & $setupPath --check-dependencies $dependencyPath
+    if ($LASTEXITCODE -ne 0) { throw 'The setup executable rejected the dependency bundle. No package was created.' }
+    $dependency = Get-Content -LiteralPath $dependencyPath -Raw | ConvertFrom-Json
+    if ($dependency.schemaVersion -ne 1) { throw 'Unsupported dependency manifest schema.' }
+    $packageFiles.Add('dependencies/dependencies.json', $dependencyPath)
+    $dependencyNames = [Collections.Generic.HashSet[string]]::new([StringComparer]::OrdinalIgnoreCase)
+    [void]$dependencyNames.Add('dependencies.json')
+    foreach ($item in @($dependency.assets) + @($dependency.notices)) {
+        $relative = [string]$item.file
+        if ([string]::IsNullOrWhiteSpace($relative) -or $relative.Contains('\') -or $relative.StartsWith('/') -or
+            @($relative.Split('/') | Where-Object { $_ -in @('', '.', '..') -or $_.Contains(':') }).Count -gt 0 -or
+            -not $dependencyNames.Add($relative)) { throw 'Unsafe or duplicate dependency bundle path.' }
+        $inputPath = Require-File (Join-Path $dependencyRoot $relative)
+        if ($item.sha256 -notmatch '^[0-9a-fA-F]{64}$' -or (File-Hash $inputPath) -ne $item.sha256) {
+            throw 'A dependency bundle input does not match its SHA-256.'
+        }
+        $packageFiles.Add(('dependencies/' + $relative), $inputPath)
+    }
+}
 $licenseRoot = Join-Path $PSScriptRoot 'licenses'
 $licenseManifestPath = Require-File (Join-Path $licenseRoot 'sources.json')
 $licenseManifest = Get-Content -LiteralPath $licenseManifestPath -Raw | ConvertFrom-Json
@@ -173,13 +198,11 @@ Other bosses remain excluded. Full-campaign co-op is unsupported.
 This package build checks files, hashes and versions; it does not verify gameplay.
 
 Every player needs their own supported Windows game and the same package.
-Keep Steam running. Use a separate source copy containing BepInEx 5,
-Modding API >=3.0.0, Cheat Console >=1.1.0 and MultiFolderLoader.
-Do not install prerequisites into the normal game for this isolated setup.
-Official prerequisite installer: https://github.com/BrandenEK/Blasphemous.Modding.Installer
+Keep Steam running.
+@DEPENDENCY_PREREQUISITES@
 
 From this package directory in PowerShell, replace the quoted placeholders:
-  .\Setup.exe --game-directory '<owned source game with prerequisites>' --destination '<new co-op copy>' --payload-manifest .\payload-manifest.json
+  @SETUP_COMMAND@
 The destination must be new or empty. Setup verifies the supported executable
 and payload hashes, copies physical files, and gives the copy its own saves/.
 Existing saves are not imported. Original game files and saves are not written.
@@ -206,6 +229,19 @@ The server manifest intentionally keeps gameplayVerified=false.
 No game assets, game assemblies, private profiles, saves or QA bots are included.
 Dependency license notices and their pinned source URLs are under licenses/.
 '@
+$setupCommand = ".\Setup.exe --game-directory '<owned source game>' --destination '<new co-op copy>' --payload-manifest .\payload-manifest.json"
+if ($DependencyManifest) {
+    $prerequisites = 'The included, pinned official loader/API/console dependencies are installed only into the new co-op copy. A clean owned game is supported; the normal installation is never changed.'
+    $setupCommand += ' --dependency-manifest .\dependencies\dependencies.json'
+} else {
+    $prerequisites = @'
+Use a separate source copy containing BepInEx 5, Modding API >=3.0.0,
+Cheat Console >=1.1.0 and MultiFolderLoader. Do not install prerequisites into
+the normal game for this isolated setup.
+Official prerequisite installer: https://github.com/BrandenEK/Blasphemous.Modding.Installer
+'@
+}
+$readme = $readme.Replace('@DEPENDENCY_PREREQUISITES@', $prerequisites).Replace('@SETUP_COMMAND@', $setupCommand)
 Write-Utf8 (Join-Path $outputPath 'README.txt') ($readme + "`r`n`r`nAssembly version: $version; protocol: 17.`r`n")
 $checksums = [ordered]@{}
 Get-ChildItem -LiteralPath $outputPath -File -Recurse | Sort-Object FullName | ForEach-Object {
