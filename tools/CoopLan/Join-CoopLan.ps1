@@ -8,12 +8,14 @@ param(
 
 $ErrorActionPreference = 'Stop'
 $address = $HostAddress.Trim()
-if ($address.Length -eq 0 -or $address.Length -gt 57 -or $address -notmatch '^[A-Za-z0-9.-]+$') {
+if ($address.Length -eq 0 -or $address -notmatch '^[A-Za-z0-9.-]+$' -or
+    [Uri]::CheckHostName($address) -notin @([UriHostNameType]::IPv4, [UriHostNameType]::Dns)) {
     throw 'Use the host IPv4 address printed by Start-CoopHost.ps1, without a port or tcp:// prefix. This client uses IPv4 or a host name.'
 }
 $endpoint = '{0}:{1}' -f $address, $Port
+if ($endpoint.Length -gt 64) { throw 'The address and port exceed the in-game Server IP field limit of 64 characters.' }
 Write-Host 'Use the same client package as the host and the other players.'
-Write-Host 'Load the isolated co-op game copy, then open the in-game multiplayer connection panel.'
+Write-Host 'Launch Play-Coop.cmd in the prepared co-op copy. Load a level, then click Multiplayer connection info at the bottom of the game window.'
 Write-Host "Server IP: $endpoint"
 Write-Host "Team number: $Team"
 Write-Host 'Player name: choose a unique name, at most 16 characters.'

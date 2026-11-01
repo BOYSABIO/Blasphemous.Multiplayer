@@ -26,6 +26,8 @@ namespace Blasphemous.Multiplayer.Common.Enums
 		EnemyParried,
 		EnemySyncDone,
 		EnemyExecuted,
-		PlayerExecutionAnim
+		PlayerExecutionAnim,
+		BossEncounter,
+		BossHazard
 	}
 }

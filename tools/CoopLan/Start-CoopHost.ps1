@@ -22,17 +22,19 @@ if ($Password.Length -gt 32 -or @($Password.ToCharArray() | Where-Object {
 $metadata = [Diagnostics.FileVersionInfo]::GetVersionInfo($serverExecutable)
 $manifestPath = Join-Path $serverDirectoryPath 'coop-release.json'
 Write-Host "Server: $($metadata.ProductVersion)"
-if (Test-Path -LiteralPath $manifestPath -PathType Leaf) {
-    $manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
-    if (-not $manifest.serverSha256 -or
-        (Get-FileHash -LiteralPath $serverExecutable -Algorithm SHA256).Hash -ne $manifest.serverSha256) {
-        throw 'The server does not match coop-release.json. Re-extract the matching package before hosting.'
-    }
-    Write-Host "Package: $($manifest.version); protocol: $($manifest.protocol)"
-    if (-not $manifest.gameplayVerified) { Write-Host 'Candidate build: gameplay verification is pending.' }
-} else {
-    Write-Host 'No release manifest is present. Confirm every player has the matching client package.'
+if (-not (Test-Path -LiteralPath $manifestPath -PathType Leaf)) {
+    throw 'No coop-release.json is present. Select the verified server folder from the matching co-op package.'
 }
+$manifest = Get-Content -LiteralPath $manifestPath -Raw | ConvertFrom-Json
+$protocol = 0
+if ($manifest.schemaVersion -ne 1 -or [string]::IsNullOrWhiteSpace($manifest.version) -or
+    -not [int]::TryParse([string]$manifest.protocol, [ref]$protocol) -or $protocol -lt 1 -or $protocol -gt 255 -or
+    $manifest.serverSha256 -notmatch '^[0-9a-fA-F]{64}$' -or
+    (Get-FileHash -LiteralPath $serverExecutable -Algorithm SHA256).Hash -ne $manifest.serverSha256) {
+    throw 'The server does not match a valid coop-release.json. Re-extract the matching package before hosting.'
+}
+Write-Host "Package: $($manifest.version); protocol: $protocol"
+if (-not $manifest.gameplayVerified) { Write-Host 'Candidate build: gameplay verification is pending.' }
 
 $listeners = [Net.NetworkInformation.IPGlobalProperties]::GetIPGlobalProperties().GetActiveTcpListeners()
 if (@($listeners | Where-Object { $_.Port -eq $Port }).Count -gt 0) {

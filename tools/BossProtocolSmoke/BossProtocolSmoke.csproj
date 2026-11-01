@@ -1,0 +1,12 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net8.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../../revived/Blasphemous.Multiplayer.Common/Blasphemous.Multiplayer.Common.csproj" />
+    <ProjectReference Include="../../revived/Blasphemous.Multiplayer.Server/Blasphemous.Multiplayer.Server.csproj" />
+  </ItemGroup>
+</Project>

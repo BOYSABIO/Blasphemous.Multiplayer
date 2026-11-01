@@ -10,6 +10,9 @@ namespace Blasphemous.Multiplayer.Client.Enemies;
 
 public class SyncedEnemy
 {
+	private WardenSyncAdapter _warden;
+	public bool IsWarden => _warden != null;
+	public void ApplyWardenHealth(float life) { _warden?.ApplyHealth(life); }
 	private struct PoseSample
 	{
 		public float HostTime;
@@ -151,6 +154,7 @@ public class SyncedEnemy
 	public void Bind(Enemy enemy)
 	{
 		Enemy = enemy;
+		_warden = WardenSyncAdapter.For(enemy);
 		VisuallyDead = false;
 		BodyHidden = false;
 		SoftHidden = false;
@@ -234,6 +238,13 @@ public class SyncedEnemy
 
 	public void ApplyAnim(int animHash, float normalizedTime, bool allowWhileDead = false, bool attacking = false)
 	{
+		if (_warden != null)
+		{
+			_warden.ApplyAnimation(animHash, normalizedTime);
+			LastSentAnimHash = animHash;
+			LastSentAnimTime = normalizedTime;
+			return;
+		}
 		if (BodyHidden || SoftHidden || (VisuallyDead && !allowWhileDead) || (!LastSentAlive && !allowWhileDead && !VisuallyDead) || animHash == 0 || Enemy == null || Enemy.Animator == null)
 		{
 			return;
@@ -263,6 +274,17 @@ public class SyncedEnemy
 		}
 		LastSentAnimHash = animHash;
 		LastSentAnimTime = normalizedTime;
+	}
+
+	internal void ResetAuthorityEpoch()
+	{
+		// Sequence numbers and Unity clocks belong to one scene authority term.
+		// Keep actor life/death/generation and native presentation state intact.
+		LastSequence = 0;
+		_poseBuffer.Clear();
+		_latestHostTime = 0f;
+		_hostTimeOffset = 0f;
+		_hasHostClock = false;
 	}
 
 	public void PushRemotePose(float hostTime, Vector2 position, bool facingRight)
@@ -299,6 +321,7 @@ public class SyncedEnemy
 
 	public void TickInterpolation(float dt)
 	{
+		if (_warden != null && !IsPuppet) return;
 		if (Enemy == null || VisuallyDead || BodyHidden || SoftHidden || !_hasHostClock || _poseBuffer.Count == 0)
 		{
 			return;
@@ -365,6 +388,8 @@ public class SyncedEnemy
 
 	public void SoftHide()
 	{
+		// A missing snapshot is not permission to hide a scripted arena actor.
+		if (_warden != null) { SetPuppet(true); return; }
 		if (Enemy == null || SoftHidden)
 		{
 			return;
@@ -421,6 +446,13 @@ public class SyncedEnemy
 
 	public void SetPuppet(bool puppet)
 	{
+		if (_warden != null)
+		{
+			IsPuppet = puppet;
+			_warden.SetPuppet(puppet);
+			if (!puppet) { _poseBuffer.Clear(); _hasHostClock = false; }
+			return;
+		}
 		if (VisuallyDead || (Enemy != null && Enemy.Dead) || !LastSentAlive)
 		{
 			IsPuppet = true;
@@ -447,6 +479,16 @@ public class SyncedEnemy
 
 	public bool ForceVisualDeath()
 	{
+		if (_warden != null)
+		{
+			if (!_warden.ApplyDeath()) return false;
+			bool newlyDead = !VisuallyDead;
+			VisuallyDead = true;
+			LastSentAlive = false;
+			LastSentLife = 0f;
+			HideBodyAt = 0f;
+			return newlyDead;
+		}
 		if (Enemy == null)
 		{
 			return false;
@@ -521,6 +563,7 @@ public class SyncedEnemy
 
 	public void TickDeferredHide()
 	{
+		if (_warden != null) return;
 		if (VisuallyDead && !BodyHidden && !(HideBodyAt <= 0f) && !(Time.time < HideBodyAt))
 		{
 			if (Enemy == null || !Enemy.gameObject.activeInHierarchy || (Enemy.SpriteRenderer != null && !Enemy.SpriteRenderer.enabled))
@@ -537,6 +580,7 @@ public class SyncedEnemy
 
 	public void HardHideBody()
 	{
+		if (_warden != null) return;
 		if (!(Enemy == null))
 		{
 			BodyHidden = true;

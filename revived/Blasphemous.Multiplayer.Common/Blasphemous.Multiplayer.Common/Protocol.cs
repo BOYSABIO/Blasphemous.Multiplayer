@@ -4,7 +4,7 @@ namespace Blasphemous.Multiplayer.Common
 {
 	public static class Protocol
 	{
-		public const byte VERSION = 16;
+		public const byte VERSION = 17;
 
 		public const string DEFAULT_IP = "localhost";
 
@@ -13,3 +13,4 @@ namespace Blasphemous.Multiplayer.Common
 		public const int MAX_FRAME_PAYLOAD = 32768;
 	}
 }
+

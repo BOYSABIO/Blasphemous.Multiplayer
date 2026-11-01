@@ -30,6 +30,24 @@ digest and the assembly version/protocol inside it. Only the multiplayer plugin,
 its common/TCP libraries, JSON data and localization are accepted. Game libraries,
 game assets, other mods and QA plugins are rejected.
 
+`clientVersion` is the numeric assembly version, for example `2.9.0`, rather than
+a display label such as `2.9.0-dev`. An omitted build or revision number means zero.
+
+A self-contained Windows setup executable can be prepared without trimming:
+
+```powershell
+local/tools/dotnet/dotnet.exe publish tools/CoopPlaySetup -c Release -r win-x64 `
+  --self-contained true -p:RuntimeFrameworkVersion=8.0.32 `
+  -p:PublishSingleFile=true -p:PublishTrimmed=false `
+  -p:IncludeNativeLibrariesForSelfExtract=true -p:DebugType=None `
+  -m:1 -nr:false -p:UseSharedCompilation=false --disable-build-servers `
+  -o '<setup output directory>'
+```
+
+Ship the generated `CoopPlaySetup.exe` with the payload manifest and client archive.
+Players run it with the same three options shown above; a separate .NET install
+is unnecessary. The owned game and base mod-loader prerequisites are still needed.
+
 The source needs BepInEx 5, Modding API >=3.0.0, Cheat Console >=1.1.0 and the
 MultiFolderLoader patcher. A clean install fails before copying, with the
 [official installer link](https://github.com/BrandenEK/Blasphemous.Modding.Installer).

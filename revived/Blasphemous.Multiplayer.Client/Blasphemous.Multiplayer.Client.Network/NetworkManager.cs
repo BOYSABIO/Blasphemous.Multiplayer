@@ -227,6 +227,11 @@ public class NetworkManager
 				case NetworkType.PlayerExecutionAnim:
 					ReceivePlayerExecutionAnim(item.Payload);
 					break;
+				case NetworkType.BossEncounter:
+				case NetworkType.BossHazard:
+					if (EnemySyncCodec.TryExtractName(item.Payload, out string bossSender, out int bossOffset))
+						Blasphemous.Multiplayer.Client.Enemies.WardenNetwork.Receive(bossSender, item.Type == (byte)NetworkType.BossHazard, item.Payload, bossOffset);
+					break;
 				}
 			}
 		}
@@ -240,6 +245,11 @@ public class NetworkManager
 			return 0;
 		}
 		return bodyIndex;
+	}
+
+	public void SendBossPacket(byte[] body, bool hazard)
+	{
+		QueueMesssage(body, hazard ? NetworkType.BossHazard : NetworkType.BossEncounter);
 	}
 
 	public void SendPosition(Vector2 position)
@@ -391,7 +401,7 @@ public class NetworkManager
 	public void SendIntro(string room, string player, string password, byte team)
 	{
 		List<byte> list = new List<byte>();
-		list.Add(16);
+		list.Add(Blasphemous.Multiplayer.Common.Protocol.VERSION);
 		AppendLengthPrefixedUtf8(list, room);
 		AppendLengthPrefixedUtf8(list, player);
 		AppendLengthPrefixedUtf8(list, password);
@@ -683,3 +693,4 @@ public class NetworkManager
 		}
 	}
 }
+

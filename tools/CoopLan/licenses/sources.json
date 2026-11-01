@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "sources": [
+    {
+      "file": "Mono.Cecil.LICENSE.txt",
+      "source": "https://github.com/jbevain/cecil/blob/98ec890d44643ad88d573e97be0e120435eda732/LICENSE.txt",
+      "sha256": "13d58ecbed676511c0c4c4009bff107025e50007ff5e7901dc562700ec62509e"
+    },
+    {
+      "file": "Basalt.CommandParser.LICENSE.txt",
+      "source": "https://github.com/BrandenEK/Basalt.CommandParser/blob/6eb56c4104756b5e26dadd2f56525d7c7d9a8e53/LICENSE.md",
+      "sha256": "d02bbe8e956b5a4f39caee418474210b5f4e13d37f203d4b543abcaa1170ba7b"
+    },
+    {
+      "file": "SimpleTCP.LICENSE.txt",
+      "source": "https://github.com/BrandonPotter/SimpleTCP/blob/61f1932201a7c5633ad2f003c97c83c31541fc85/LICENSE",
+      "sha256": "b40930bbcf80744c86c46a12bc9da056641d722716c378f5659b9e555ef833e1"
+    },
+    {
+      "file": "dotnet-LICENSE.TXT",
+      "source": "https://www.nuget.org/packages/Microsoft.NETCore.App.Runtime.win-x64/8.0.32",
+      "sha256": "d7a68596ab69b06f51ca278a6545148e4269a9381c26d597c13df5d88e08cf5b"
+    },
+    {
+      "file": "dotnet-THIRD-PARTY-NOTICES.TXT",
+      "source": "https://www.nuget.org/packages/Microsoft.NETCore.App.Runtime.win-x64/8.0.32",
+      "sha256": "b60b2912da28eaa6518593c9e2efb5334ee062d3c42e80d8fdfa806b3dc52977"
+    }
+  ]
+}

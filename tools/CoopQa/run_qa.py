@@ -18,6 +18,7 @@ def main() -> int:
     ap.add_argument("--workspace", type=Path, default=Path(__file__).resolve().parents[2])
     ap.add_argument("--port", type=int, default=27052)
     ap.add_argument("--scenario", choices=["boot", "connect", "combat", "death", "migration", "warden", "piety"], default="boot")
+    ap.add_argument("--extended-boss", action="store_true", help="Exercise Warden hazards, replay, handoff and native death")
     args = ap.parse_args()
     root = args.workspace.resolve()
     sys.path.insert(0, str(root / "local/coop-anything/tools/bridge"))
@@ -30,7 +31,9 @@ def main() -> int:
     passed = False
     logs = [root / f"local/slots/{i}/BepInEx/LogOutput.log" for i in range(2)]
     log_offsets = [p.stat().st_size for p in logs]
-    builds = [{"slot": i, "clientSha256": hashlib.sha256((root / f"local/slots/{i}/Modding/plugins/BlasClient.dll").read_bytes()).hexdigest()}
+    builds = [{"slot": i, "clientSha256": hashlib.sha256((root / f"local/slots/{i}/Modding/plugins/BlasClient.dll").read_bytes()).hexdigest(),
+               "commonSha256": hashlib.sha256((root / f"local/slots/{i}/Modding/data/Blasphemous.Multiplayer.Common.dll").read_bytes()).hexdigest(),
+               "qaSha256": hashlib.sha256(next((root / f"local/slots/{i}").rglob("Blasphemous.CoopQA.dll")).read_bytes()).hexdigest()}
               for i in range(2)]
     (evidence / "builds.json").write_text(json.dumps(builds, indent=2), encoding="utf-8")
 
@@ -154,6 +157,109 @@ def main() -> int:
                      lambda ss: any(e["instance"] == guest_enemy["instance"] and abs(e["life"] - h["life"]) < 0.5 for e in ss[1]["enemies"]), timeout=12)
         check(h["life"] < start_life, "guest attack changed actual host health")
         check(any(e["instance"] == guest_enemy["instance"] and abs(e["life"] - h["life"]) < 0.5 for e in after[1]["enemies"]), "both actual games agree after the guest hit")
+        if args.extended_boss:
+            if args.scenario != "warden":
+                raise ValueError("Extended boss checks currently implement Warden only")
+            def boss(s):
+                return next((e for e in s["enemies"] if e["id"] == "BS13"), None)
+            def safe_states(label):
+                for g in bridges:
+                    player = g.state()["player"]
+                    if not player or not player["active"]:
+                        continue
+                    if player["dead"]:
+                        raise AssertionError("A test player died before the next action; reload the scenario")
+                    g.call("bot.heal")
+                return snapshot(label)
+            # IsFightStarted becomes true before the authored intro jump ends.
+            # Wait for its native decision tree instead of sampling that gap.
+            states = wait("native Warden intro completes", lambda: safe_states("boss-extended-start"),
+                          lambda ss: boss(ss[0])["treeRunning"] is True and boss(ss[1])["treeRunning"] is False, timeout=15)
+            check(boss(states[0])["treeRunning"] is True and boss(states[1])["treeRunning"] is False,
+                  "only the authoritative Warden runs its decision tree")
+            check(boss(states[1])["damageCollider"] is True, "guest Warden retains its native damage collider")
+            check(states[1]["wardenIntroVisible"] is False, "guest intro dummy has finished its presentation")
+            sword_life = boss(states[0])["life"]
+            def sword_overlap():
+                current = bridges[1].state()
+                target = boss(current)
+                if target and target["position"]["y"] < 12:
+                    bridges[1].call("bot.teleport", {"x": target["position"]["x"] - 1.5, "y": 9.01})
+                    bridges[1].call("bot.walk", {"x": 1, "seconds": .08})
+                    time.sleep(.12)
+                    bridges[1].call("bot.swordhit")
+                return safe_states("sword-overlap-wait")
+            states = wait("guest native sword collision reaches authoritative Warden", sword_overlap,
+                          lambda ss: boss(ss[0])["life"] < sword_life and abs(boss(ss[0])["life"] - boss(ss[1])["life"]) < .5,
+                          timeout=15)
+            check(True, "guest native sword overlap damages the shared boss through its enabled damage collider")
+            seen = set()
+            def hazards_match(ss):
+                host = {a["id"]: a for a in ss[0]["wardenHazards"] if a["active"]}
+                guest = {a["id"]: a for a in ss[1]["wardenHazards"] if a["active"]}
+                for key in host.keys() & guest.keys():
+                    a, b = host[key], guest[key]
+                    if (a["kind"] == b["kind"] and a["prefab"] == b["prefab"]
+                        and abs(a["position"]["x"] - b["position"]["x"]) < .15
+                        and abs(a["position"]["y"] - b["position"]["y"]) < .15
+                        and a["replica"] is False and b["replica"] is True
+                        and b["colliders"] and all(not c["enabled"] for c in b["colliders"])):
+                        seen.add(a["kind"])
+                return {"Area", "Mace"}.issubset(seen)
+            wait("both native hazard kinds replay at matching positions", lambda: safe_states("hazard-wait"), hazards_match, timeout=25)
+            check(True, "Area and Mace effects share identity, prefab, position and one collision authority")
+
+            # Disconnect/reconnect a live guest to exercise the server's cached
+            # encounter replay, rather than calling the guest boss-start bot.
+            bridges[1].call("bot.disconnect")
+            wait("guest disconnected", bridges[1].state, lambda s: not s["connected"])
+            bridges[1].call("bot.loadscene", {"scene": "D01Z01S01"})
+            wait("guest leaves arena", bridges[1].state, lambda s: s["inLevel"] and s["level"] == "D01Z01S01")
+            safe_states("latejoin-away")
+            bridges[1].call("bot.loadscene", {"scene": scene})
+            wait("guest returns to arena", bridges[1].state, lambda s: s["inLevel"] and s["level"] == scene and boss(s))
+            bridges[1].call("bot.connect", {"name": "QAGuest", "port": args.port})
+            states = wait("late join native encounter and health replay", lambda: safe_states("latejoin-wait"),
+                          lambda ss: ss[1]["connected"] and len(ss[0]["peers"]) == 1
+                          and any(f["started"] for f in ss[1]["bossFights"])
+                          and abs(boss(ss[0])["life"] - boss(ss[1])["life"]) < .5, timeout=20)
+            check(True, "fresh guest arena receives native encounter start and current boss health")
+
+            old_term = states[1]["hostTerm"]
+            handoff_life = boss(states[1])["life"]
+            before_position = boss(states[1])["position"]
+            bridges[0].call("bot.loadscene", {"scene": "D01Z01S01"})
+            promoted = wait("living boss authority handoff", bridges[1].state,
+                            lambda s: s["sceneHost"] and s["hostTerm"] > old_term and boss(s)["treeRunning"] is True, timeout=15)
+            check(boss(promoted)["controller"] is True, "promoted Warden restores native movement and decisions")
+            wait("host completes arena exit", bridges[0].state, lambda s: s["inLevel"] and s["level"] == "D01Z01S01")
+            safe_states("promoted")
+            moved = wait("promoted boss keeps fighting", bridges[1].state,
+                         lambda s: boss(s) and (abs(boss(s)["position"]["x"] - before_position["x"]) > .3
+                                               or abs(boss(s)["position"]["y"] - before_position["y"]) > .3), timeout=20)
+            check(True, "the promoted Warden continues moving in the actual game")
+            bridges[0].call("bot.loadscene", {"scene": scene})
+            states = wait("original host rejoins the surviving authority", lambda: safe_states("handoff-return-wait"),
+                          lambda ss: ss[0]["inLevel"] and ss[0]["level"] == scene and boss(ss[0])
+                          and not ss[0]["sceneHost"] and ss[1]["sceneHost"] and ss[0]["hostTerm"] == ss[1]["hostTerm"]
+                          and any(f["started"] for f in ss[0]["bossFights"]), timeout=45)
+            check(True, "returning original host joins the active encounter without preempting its authority")
+            check(all(abs(boss(s)["life"] - handoff_life) < .5 for s in states),
+                  "returning host preserves the surviving boss health instead of resetting it")
+            states = wait("surviving host keeps native decisions", lambda: safe_states("returned-ai-wait"),
+                          lambda ss: boss(ss[1])["treeRunning"] is True and boss(ss[0])["treeRunning"] is False, timeout=15)
+            check(True, "surviving authority continues native boss decisions after the original host rejoins")
+            # Damage relay validates hit proximity. Move the attacking player
+            # beside the actual boss before testing a lethal hit after travel.
+            target = boss(states[0])
+            bridges[0].call("bot.teleport", {"x": target["position"]["x"] - 2, "y": target["position"]["y"]})
+            bridges[0].call("bot.hit", {"instance": target["instance"], "damage": 10000})
+            states = wait("native Warden death on both games", lambda: safe_states("boss-death-wait"),
+                          lambda ss: all((boss(s) is None or boss(s)["dead"])
+                                         and not any(f["started"] for f in s["bossFights"]) for s in ss), timeout=20)
+            check(True, "guest lethal hit ends both native boss fights")
+            check(all(s["wardenDefeated"] or s["wardenRoomDefeated"] for s in states),
+                  "both games record the native Warden defeat flag")
         if args.scenario in ("death", "migration"):
             bridges[1].call("bot.hit", {"instance": guest_enemy["instance"], "damage": 1000})
             def dead_or_gone(state, instance):
@@ -181,9 +287,9 @@ def main() -> int:
                      lambda s: s["inLevel"] and s["level"] == "D01Z01S01" and s["player"] and s["player"]["active"], timeout=60)
                 bridges[0].call("bot.loadscene", {"scene": scene})
                 wait("host scene return", bridges[0].state,
-                     lambda s: s["inLevel"] and s["level"] == scene and s["sceneHost"], timeout=60)
+                     lambda s: s["inLevel"] and s["level"] == scene and not s["sceneHost"], timeout=60)
                 returned = wait("authority after return", lambda: snapshot("return-wait"),
-                                lambda ss: ss[0]["sceneHost"] and not ss[1]["sceneHost"] and ss[0]["hostTerm"] == ss[1]["hostTerm"], timeout=12)
+                                lambda ss: not ss[0]["sceneHost"] and ss[1]["sceneHost"] and ss[0]["hostTerm"] == ss[1]["hostTerm"], timeout=12)
                 check(dead_or_gone(returned[1], guest_enemy["instance"]), "stored death survives host return")
         snapshot("final")
         passed = True
@@ -194,6 +300,11 @@ def main() -> int:
         return 1
     finally:
         for g in bridges:
+            if args.extended_boss:
+                try:
+                    g.call("bot.pause", {"scale": 0})
+                except Exception:
+                    pass
             g.close()
         (evidence / "checks.json").write_text(json.dumps(checks, indent=2), encoding="utf-8")
         print(f"EVIDENCE: {evidence}", flush=True)

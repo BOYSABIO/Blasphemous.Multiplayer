@@ -148,6 +148,30 @@ try {
     $replayedDeath = Read-Frame $guestPeer 16
     Assert-Result ($replayedDeath.Length -gt 0) 'server replays stored scene death during migration'
 
+    if ($ExpectedProtocol -ge 17) {
+        # Discard authority notifications from earlier joins before measuring
+        # the returning preferred player's effect on this scene's ownership.
+        foreach ($peer in @($hostPeer, $guestPeer)) {
+            Send-Frame $peer 12 ([byte[]]::new(6))
+            [void](Read-Frame $peer 12)
+            for ($i = $peer.Pending.Count - 1; $i -ge 0; $i--) {
+                if ($peer.Pending[$i].Type -eq 20) { $peer.Pending.RemoveAt($i) }
+            }
+        }
+        Send-Frame $hostPeer 3 ([Text.Encoding]::UTF8.GetBytes('qa-room'))
+        $continuingTerm = Read-Authority $guestPeer 'QAGuest'
+        $returningTerm = Read-Authority $hostPeer 'QAGuest'
+        Assert-Result ($continuingTerm -eq $newTerm -and $returningTerm -eq $newTerm) 'returning preferred player does not preempt the incumbent or advance its term'
+        $survivingState = [Blasphemous.Multiplayer.Common.Networking.EnemySyncCodec]::BuildEnemyBody(
+            124, 'qa-living-enemy', 9.5, -3, 37, $true, $true, $false, $false, $false, $false,
+            0, 0, 0, 124, $true, $sceneHash, $newTerm, 1, 1)
+        Send-Frame $guestPeer 13 $survivingState
+        Assert-NamedBody (Read-Frame $hostPeer 13) 'QAGuest' $survivingState 'returning player receives the incumbent living-enemy health and pose'
+        Send-Frame $guestPeer 4 ([byte[]]@(0))
+        $replacementTerm = Read-Authority $hostPeer 'QAHost'
+        Assert-Result ($replacementTerm -gt $newTerm) 'preferred player becomes replacement when the incumbent leaves'
+    }
+
     Write-Output "ReleaseProtocolSmoke: PASS ($script:checks checks; protocol $ExpectedProtocol; $ServerLabel; scripted TCP peers, no Unity gameplay)"
 } finally {
     foreach ($peer in $script:peers) { $peer.Client.Dispose() }

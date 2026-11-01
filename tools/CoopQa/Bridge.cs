@@ -46,7 +46,7 @@ public sealed class Bridge : BaseUnityPlugin
     string instance;
     string[] methods = { "ping", "version", "methods", "events", "state", "exec", "screenshot",
         "bot.landing", "bot.newgame", "bot.selectslot", "bot.loadscene", "bot.connect", "bot.disconnect",
-        "bot.teleport", "bot.walk", "bot.hit", "bot.heal", "bot.bossstart", "bot.flag", "bot.pause" };
+        "bot.teleport", "bot.walk", "bot.hit", "bot.swordhit", "bot.heal", "bot.bossstart", "bot.wardenaction", "bot.flag", "bot.pause" };
 
     void Awake()
     {
@@ -224,19 +224,48 @@ public sealed class Bridge : BaseUnityPlugin
     static float Number(JObject p, string key, float fallback = 0) => (float?)p[key] ?? fallback;
     static object Position(Transform t) => t == null ? null : new { x = t.position.x, y = t.position.y, z = t.position.z };
 
+    static object[] HazardState()
+    {
+        var type = Multiplayer?.GetType().Assembly.GetType("Blasphemous.Multiplayer.Client.Enemies.WardenNetwork");
+        var dictionary = Read(type, "Hazards") as IDictionary;
+        if (dictionary == null) return new object[0];
+        var result = new List<object>();
+        foreach (DictionaryEntry item in dictionary)
+        {
+            var area = Read(item.Value, "Area") as Component;
+            var data = Read(item.Value, "Data");
+            var animator = Read(area, "Animator") as Animator;
+            result.Add(new {
+                id = item.Key.ToString(), instance = area == null ? 0 : area.GetInstanceID(),
+                kind = Read(data, "Kind")?.ToString(), prefab = Read(data, "PrefabIndex"),
+                replica = Read(item.Value, "Replica"), position = Position(area?.transform),
+                active = area != null && area.gameObject.activeInHierarchy,
+                stage = Read(area, "_state")?.ToString(), timer = Read(area, "timer"),
+                animation = animator?.GetCurrentAnimatorStateInfo(0).shortNameHash,
+                animationTime = animator?.GetCurrentAnimatorStateInfo(0).normalizedTime,
+                colliders = area == null ? new object[0] : area.GetComponentsInChildren<Collider2D>(true)
+                    .Select(c => (object)new { enabled = c.enabled, active = c.gameObject.activeInHierarchy }).ToArray()
+            });
+        }
+        return result.ToArray();
+    }
+
     object State()
     {
         var multiplayer = Multiplayer;
         var manager = Read(multiplayer, "EnemyManager");
         var enemies = UObject.FindObjectsOfType<Enemy>().Select(enemy => new {
             instance = enemy.GetInstanceID(), id = enemy.Id, type = enemy.GetType().FullName,
-            position = Position(enemy.transform), life = enemy.CurrentLife, dead = enemy.Dead,
+            position = Position(enemy.transform), life = enemy.CurrentLife, maximumLife = enemy.Stats.Life.Base, dead = enemy.Dead,
             active = enemy.gameObject.activeInHierarchy,
             ai = enemy.GetComponent<Gameplay.GameControllers.Enemies.Framework.IA.EnemyBehaviour>()?.enabled,
             controller = (Read(enemy, "Controller") as Behaviour)?.enabled,
             treeRunning = Read(Read(enemy.GetComponent<Gameplay.GameControllers.Enemies.Framework.IA.EnemyBehaviour>(), "BehaviourTree"), "isRunning"),
             animation = (Read(enemy, "Animator") as Animator)?.GetCurrentAnimatorStateInfo(0).shortNameHash,
             animationTime = (Read(enemy, "Animator") as Animator)?.GetCurrentAnimatorStateInfo(0).normalizedTime,
+            damageCollider = (Read(Read(enemy, "DamageArea"), "DamageAreaCollider") as Collider2D)?.enabled,
+            behaviourState = Read(Read(enemy, "Behaviour"), "currentState")?.ToString(),
+            lastAttack = Read(Read(enemy, "Behaviour"), "lastAttack")?.ToString(),
             target = enemy.Target == null ? null : enemy.Target.name
         }).ToArray();
         var player = Core.Logic?.Penitent;
@@ -254,10 +283,16 @@ public sealed class Bridge : BaseUnityPlugin
             player = player == null ? null : new { position = Position(player.transform), life = player.CurrentLife, dead = player.Dead, active = player.gameObject.activeInHierarchy },
             enemies,
             bossFights = UObject.FindObjectsOfType<Gameplay.GameControllers.Bosses.BossFight.BossFightManager>()
-                .Select(f => new { id = f.Boss == null ? null : f.Boss.Id, started = f.IsFightStarted, phase = f.CurrentBossPhaseId }).ToArray(),
-            timeScale = Time.timeScale,
+                .Select(f => new { id = f.Boss == null ? null : f.Boss.Id, started = f.IsFightStarted, phase = f.CurrentBossPhaseId,
+                    phases = f.Phases == null ? new object[0] : f.Phases.Select(phase => (object)new {
+                        id = phase.Id, minimum = phase.PhaseInterval.x, maximum = phase.PhaseInterval.y }).ToArray() }).ToArray(),
+            timeScale = Time.timeScale, gameTime = Time.time,
+            wardenHazards = HazardState(),
             wardenIntroDummy = Position((Find("ElderBrotherIntroDummy") as Component)?.transform),
+            wardenIntroVisible = (Find("ElderBrotherIntroDummy") as Component)?.GetComponentsInChildren<Renderer>(true)
+                .Any(r => r.enabled && r.gameObject.activeInHierarchy),
             wardenDefeated = Core.Events != null && Core.Events.GetFlag("D17Z01_BOSSDEAD"),
+            wardenRoomDefeated = Core.Events != null && Core.Events.GetFlag("D17Z01S11_BOSSDEAD"),
             menu = new { main = Find("Gameplay.UI.Others.MenuLogic.NewMainMenu") != null }
         };
     }
@@ -326,11 +361,28 @@ public sealed class Bridge : BaseUnityPlugin
                     DamageAmount = Number(p, "damage", 10), Force = 1,
                     DamageType = (DamageArea.DamageType)0, DamageElement = (DamageArea.DamageElement)0 });
                 return new { accepted = true, lifeAfter = target.CurrentLife };
+            case "bot.swordhit":
+                // Exercise the real weapon's overlap/collision path. Unlike
+                // bot.hit, this has no enemy ID and cannot damage a distant actor.
+                var attack = Read(Core.Logic.Penitent, "EntityAttack");
+                Call(attack, "ClearHitEntityList");
+                Call(attack, "CurrentWeaponAttack", DamageArea.DamageType.Normal, true);
+                return new { accepted = true };
             case "bot.bossstart":
                 object fight = Find("Gameplay.GameControllers.Bosses.BossFight.BossFightManager");
                 if (Read(fight, "SpawnPoint") != null) Call(fight, "SetPenitentOnSpawnPoint");
                 if (!(bool)(Read(fight, "IsFightStarted") ?? false)) Call(fight, "StartBossFight");
                 return new { accepted = true };
+            case "bot.wardenaction":
+                var warden = Find("Gameplay.GameControllers.Bosses.ElderBrother.ElderBrother");
+                var behaviour = Read(warden, "Behaviour");
+                if (warden == null || !(bool)(Read(Read(multiplayer, "EnemyManager"), "IsSceneHost") ?? false))
+                    throw new InvalidOperationException("A live authoritative Warden is required");
+                string action = (string)p["action"];
+                if (action != "AREA" && action != "JUMP") throw new ArgumentException("Expected AREA or JUMP");
+                Type actionType = GameType("Gameplay.GameControllers.Bosses.ElderBrother.ElderBrotherBehaviour+ELDER_BROTHER_ATTACKS");
+                Call(behaviour, "LaunchAction", Enum.Parse(actionType, action), true);
+                return new { accepted = true, action };
             case "bot.flag":
                 Core.Events.SetFlag((string)p["name"], (bool?)p["value"] ?? true);
                 return new { accepted = true };

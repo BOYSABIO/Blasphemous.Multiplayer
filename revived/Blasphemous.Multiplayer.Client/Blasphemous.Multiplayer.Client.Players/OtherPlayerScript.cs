@@ -12,6 +12,7 @@ namespace Blasphemous.Multiplayer.Client.Players;
 
 public class OtherPlayerScript : MonoBehaviour, IDamageable
 {
+	public Vector2 LatestNetworkPosition => _hasPositionTarget ? _positionTarget : (Vector2)transform.position;
 	private PlayerStatus playerStatus;
 
 	private bool playerDead;
@@ -436,6 +437,13 @@ public class OtherPlayerScript : MonoBehaviour, IDamageable
 	public void Damage(Hit hit)
 	{
 		Enemy enemy = ((hit.AttackingEntity != null) ? hit.AttackingEntity.GetComponentInParent<Enemy>() : null);
+		// Warden pooled areas are Weapon roots rather than children of the boss.
+		// Their native SetOwner supplies the same authoritative attacker identity.
+		if (enemy == null && hit.AttackingEntity != null)
+		{
+			var weapon = hit.AttackingEntity.GetComponentInParent<Gameplay.GameControllers.Entities.Weapon.Weapon>();
+			if (weapon != null && weapon.WeaponOwner is Gameplay.GameControllers.Bosses.ElderBrother.ElderBrother warden) enemy = warden;
+		}
 		if (enemy != null && EnemyManager.IsSyncableEnemy(enemy))
 		{
 			if (!playerDead)

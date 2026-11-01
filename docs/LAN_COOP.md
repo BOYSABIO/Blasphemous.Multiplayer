@@ -1,13 +1,29 @@
 # Blasphemous co-op on separate PCs on the same LAN
 
-The planned package is a **2.9 development candidate, unverified**. Its final
-version, protocol and gameplay evidence are still pending boss-sync work. The
-scripts below accept the final matching server folder; they do not select or
+The source builds an **experimental 2.9.0 / protocol-17 candidate**. The Warden
+is the only boss admitted to synchronization; other bosses remain excluded and
+full-campaign co-op is unsupported. Gameplay verification is still in progress.
+The scripts below accept the matching server folder; they do not select or
 install an older build automatically.
 
 Every player needs an owned game copy, the same client package, Modding API and
 Cheat Console. The host also needs the matching server. Keep co-op testing in
 isolated game/save copies; the normal install and saves remain unchanged.
+
+Prepare each player's separate copy using the package's self-contained
+`Setup.exe` builder and `payload-manifest.json`:
+
+```powershell
+.\Setup.exe --game-directory '<owned game directory with prerequisites>' `
+  --destination '<new co-op directory>' --payload-manifest .\payload-manifest.json
+```
+
+The builder checks the supported game identity, base loader, Modding API,
+Console and payload hashes before copying; see
+[player-copy setup](../tools/CoopPlaySetup/README.md) for prerequisites and limits.
+Then launch `Play-Coop.cmd` inside that new copy. Its saves are in `saves/` under
+the copy. Keep Steam running with the owned game. Each PC supplies its own game;
+the mod package does not contain game files.
 
 ## Host
 
@@ -44,7 +60,8 @@ The optional connection check opens a temporary TCP connection and closes it.
 It establishes reachability only; the game's version/protocol/password
 handshake is checked when joining in-game.
 
-Load each isolated co-op copy and open its multiplayer connection panel:
+Load a level in each isolated co-op copy, then click **Multiplayer connection
+info** at the bottom of the game window:
 
 1. Host player: Server IP `localhost:27051`.
 2. Other players: Server IP `<host-LAN-IPv4>:27051`.
@@ -77,8 +94,8 @@ and leaves the setting unchanged. If addresses and port match but guests still
 cannot connect, check whether a guest Wi-Fi network or access-point isolation
 prevents PCs from reaching each other.
 
-If the package provides `server/coop-release.json`, the host script verifies
-the executable's SHA-256 and prints the matching version/protocol. A failed
+The host script requires `server/coop-release.json`, verifies the executable's
+SHA-256 and prints the matching version/protocol. A missing manifest or failed
 hash check stops startup. A TCP connection alone is not gameplay verification.
 
 ## Portable Windows server preparation
@@ -88,13 +105,54 @@ Windows x64 server can include its runtime, so friends do not need a separate
 .NET SDK or runtime installation. Do not trim the server: its command parser
 sets option properties through reflection.
 
-The workspace already caches the .NET 8.0.32 Windows runtime pack and apphost,
-so an offline feasibility build can use SDK 8.0.426 with
-`RuntimeFrameworkVersion=8.0.32`, `PublishSingleFile=true`,
-`IncludeNativeLibrariesForSelfExtract=true`, `EnableCompressionInSingleFile=true`
-and `PublishTrimmed=false`. Final shipping must use the exact client/server
-version and protocol after gameplay checks pass.
+`tools/CoopLan/Publish-CoopServer.ps1` publishes that single-file server and
+creates a hash manifest with `gameplayVerified: false`. It checks the compiled
+common assembly's protocol against the explicitly supplied value. The output
+directory must be new or empty. It does not start the server or mark gameplay as
+verified. The currently maintained candidate uses protocol 17:
+
+```powershell
+.\tools\CoopLan\Publish-CoopServer.ps1 `
+  -ServerProject .\revived\Blasphemous.Multiplayer.Server\Blasphemous.Multiplayer.Server.csproj `
+  -OutputDirectory .\local\server-build -ExpectedProtocol 17 `
+  -DotnetPath .\local\tools\dotnet\dotnet.exe -PackageCache .\artifacts\packages
+```
+
+This developer example uses the workspace's pinned SDK 8.0.426 and cached
+runtime/apphost 8.0.32. It has built successfully offline. `-PackageCache` limits
+restore to that existing local source; omit it for the project's normal NuGet
+sources. The publish settings explicitly disable trimming and debug symbols.
+Final shipping must use the exact client/server version and protocol after
+gameplay checks pass. Protocol-16 baseline clients cannot join this protocol-17
+server.
 
 No game assemblies, private paths, saves, reference dumps or QA bot plugins
-belong in that portable server package. Final packaging remains pending; these
-instructions do not claim the development build is ready for a playthrough.
+belong in that portable server package. Gameplay verification and the final
+player package remain pending; these instructions do not claim the development
+build is ready for a playthrough.
+
+## Reproducible candidate package
+
+After building matching protocol-17 components, a developer can assemble a new
+local candidate folder:
+
+```powershell
+.\tools\CoopLan\Package-CoopRelease.ps1 `
+  -ClientBuildDirectory '<matching client bin/Release/net35>' `
+  -ServerDirectory '<self-contained server with coop-release.json>' `
+  -SetupExecutable '<self-contained CoopPlaySetup.exe>' `
+  -OutputDirectory '<new candidate directory>'
+```
+
+The builder checks numeric client/common/server versions, protocol 17 and the
+server hash before writing anything. It selects exactly seven mod files for
+`BlasClient.zip`, using the published plugin/data/localization layout. Build
+references are excluded even when present in the input directory. ZIP entry
+order and timestamps are fixed. It copies the server and setup executables,
+host/join helpers and license, then records their SHA-256 values.
+
+The generated README identifies the Warden adapter as experimental and says
+that other bosses remain excluded and full-campaign co-op is unsupported. Both
+package manifests keep `gameplayVerified: false`; creating a package does not
+establish gameplay or remote-PC LAN results. Existing nonempty output folders
+are refused, and partial failed outputs are kept for inspection.

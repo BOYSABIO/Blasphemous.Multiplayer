@@ -160,3 +160,37 @@ posting, account changes, or messages to other people have been requested.
 Outstanding: Warden encounter/hazards/death/late-join proof, further boss adapters,
 LAN setup/package verification, and honest installation/QA documentation. The
 existing candidate ZIP is not a completed co-op release.
+
+## Resumed verification — 2026-11-01
+
+- Refreshed the hub checkout (already current). Public issue search returned no
+  Blasphemous issues; the separate PR search hit GitHub's unauthenticated rate
+  limit. No account or public posting was used.
+- The protocol-17 candidate passes 19 scripted wire checks and 46 focused
+  codec/cache checks, including malformed headers, replay expiry and authority
+  changes. These alone do not establish gameplay correctness.
+- Real clients exposed a native Mono crash at connection. Windows crash dumps
+  identified `mono_object_isinst` receiving a null class. The game's stripped
+  framework lacks `System.IO.InvalidDataException`, which the new packet reader
+  referenced. A type audit identified that single missing type. Replacing its
+  three uses with supported `IOException` in the existing DLL was a controlled
+  positive test: both clients then completed the Warden's native encounter
+  start and shared guest damage (17 assertions). Removing only the jump-target
+  Harmony patch had not fixed the crash; that hypothesis was rejected.
+- The source fix is rebuilt. Its current audits resolve 2,359 actual game-member
+  references and 387 runtime type references without violations or missing
+  types. Framework-profile checks are needed alongside access checks; compiler
+  target selection alone did not catch the stripped Unity framework difference.
+- The passing Warden run also produced matching Area/Mace effect identities and
+  native host collision damage transported to the guest. Extended lifecycle
+  assertions are still being run before claiming defeat, replay or migration.
+- Player-copy setup passed 40 focused checks on a physical sample. Native
+  product identity and save root are separate; only cloud-storage and Steam
+  restart APIs are suppressed. Achievement/stat methods remain unchanged.
+  Runtime boot of the final player copy is still pending.
+- LAN scripts prepare a self-contained untrimmed server and optional application
+  firewall rule restricted to Private networks and LocalSubnet. Publisher/guard
+  and dry-run checks passed; no actual firewall rule has been created.
+
+Only the Warden has a boss adapter. Other boss families remain excluded; this
+is not yet verified campaign co-op or a test between separate PCs.

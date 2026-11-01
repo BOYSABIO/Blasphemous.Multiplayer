@@ -35,7 +35,9 @@ internal static class Program
             if (Hash(Path.Combine(source, "Blasphemous.exe")) != SupportedExeSha256)
                 throw new InvalidOperationException("Game executable does not match the supported, recorded Blasphemous Windows build.");
             var payload = ReadPayload(manifestPath);
-            CheckDependencies(source);
+            var dependencies = options.TryGetValue("--dependency-manifest", out var dependencyManifest) ? DependencyBundle.Read(dependencyManifest) : null;
+            if (dependencies == null) CheckDependencies(source);
+            else if (!File.Exists(Path.Combine(source, "UnityPlayer.dll"))) throw new InvalidDataException("The source is missing the owned game's UnityPlayer.dll.");
             var sourceData = Path.Combine(source, "Blasphemous_Data");
             var gameAssembly = Path.Combine(sourceData, "Managed", "Assembly-CSharp.dll");
             var platformAssembly = Path.Combine(sourceData, "Managed", "Assembly-CSharp-firstpass.dll");
@@ -43,7 +45,7 @@ internal static class Program
             using (var assembly = AssemblyDefinition.ReadAssembly(gameAssembly)) _ = SavePathMethod(assembly);
             using (var assembly = AssemblyDefinition.ReadAssembly(platformAssembly)) ValidatePlatform(assembly);
             // Enumerate and validate every copied source path before creating the destination.
-            var copyPlan = BuildCopyPlan(source);
+            var copyPlan = BuildCopyPlan(source, dependencies == null);
             var sourceHashes = new Dictionary<string, string> {
                 ["Blasphemous.exe"] = SupportedExeSha256,
                 ["Blasphemous_Data/data.unity3d"] = Hash(Path.Combine(sourceData, "data.unity3d")),
@@ -63,6 +65,8 @@ internal static class Program
             var backups = Path.Combine(profile, "setup-backups");
             var saves = Path.Combine(destination, "saves") + Path.DirectorySeparatorChar;
             Directory.CreateDirectory(profile); Directory.CreateDirectory(saves);
+            dependencies?.Install(destination);
+            CheckDependencies(destination);
             var bundlePath = Path.Combine(destination, "Blasphemous_Data", "data.unity3d");
             var gamePath = Path.Combine(destination, "Blasphemous_Data", "Managed", "Assembly-CSharp.dll");
             var platformPath = Path.Combine(destination, "Blasphemous_Data", "Managed", "Assembly-CSharp-firstpass.dll");
@@ -100,6 +104,7 @@ internal static class Program
                 schemaVersion = 1, productName = ProductName, saveRoot = saves,
                 clientVersion = payload.ClientVersion, protocol = payload.Protocol,
                 payloadArchiveSha256 = payload.Sha256,
+                dependencyBundle = dependencies?.Identity,
                 originalGameFilesUnchanged = true, steamAchievements = "preserved",
                 cloudStorage = "disabled for this separate local profile", files = records
             };
@@ -122,12 +127,12 @@ internal static class Program
     sealed class FileRecord { public string Path { get; set; } = ""; public string BeforeSha256 { get; set; } = ""; public string AfterSha256 { get; set; } = ""; }
     static Dictionary<string, string> Parse(string[] args)
     {
-        var valid = new[] { "--game-directory", "--destination", "--payload-manifest" };
-        if (args.Length != 6) throw new ArgumentException("Usage: CoopPlaySetup --game-directory <owned modded game> --destination <new empty directory> --payload-manifest <manifest.json>");
+        var valid = new[] { "--game-directory", "--destination", "--payload-manifest", "--dependency-manifest" };
+        if (args.Length != 6 && args.Length != 8) throw new ArgumentException("Usage: CoopPlaySetup --game-directory <owned game> --destination <new empty directory> --payload-manifest <manifest.json> [--dependency-manifest <dependencies.json>]");
         var result = new Dictionary<string, string>();
         for (var i = 0; i < args.Length; i += 2)
             if (!valid.Contains(args[i]) || !result.TryAdd(args[i], args[i + 1])) throw new ArgumentException("Unknown or duplicate setup option.");
-        if (valid.Any(v => !result.ContainsKey(v))) throw new ArgumentException("All three setup options are required.");
+        if (valid.Take(3).Any(v => !result.ContainsKey(v))) throw new ArgumentException("All three setup options are required.");
         return result;
     }
     static string Hash(string path) { using var stream = File.OpenRead(path); return Convert.ToHexString(SHA256.HashData(stream)); }
@@ -151,7 +156,7 @@ internal static class Program
         if (bepinex.Major != 5 || api < new Version(3, 0, 0) || console < new Version(1, 1, 0))
             throw new InvalidOperationException("Requires BepInEx 5, Modding API >=3.0.0 and Cheat Console >=1.1.0. Official installer: " + DependenciesLink);
     }
-    static List<CopyItem> BuildCopyPlan(string source)
+    static List<CopyItem> BuildCopyPlan(string source, bool includeDependencies)
     {
         var result = new List<CopyItem>();
         void Add(string file)
@@ -160,7 +165,7 @@ internal static class Program
             result.Add(new CopyItem(file, Path.GetRelativePath(source, file)));
         }
         foreach (var file in new[] { "Blasphemous.exe", "UnityPlayer.dll", "Galaxy64.dll", "GalaxyCSharpGlue.dll", "winhttp.dll" })
-            if (File.Exists(Path.Combine(source, file))) Add(Path.Combine(source, file));
+            if ((includeDependencies || file != "winhttp.dll") && File.Exists(Path.Combine(source, file))) Add(Path.Combine(source, file));
         void Tree(string root)
         {
             RejectReparsePoints(root);
@@ -168,6 +173,7 @@ internal static class Program
             foreach (var folder in Directory.EnumerateDirectories(root)) Tree(folder);
         }
         Tree(Path.Combine(source, "Blasphemous_Data"));
+        if (!includeDependencies) return result;
         Tree(Path.Combine(source, "BepInEx", "core"));
         Add(Path.Combine(source, "BepInEx", "patchers", "BepInEx.MultiFolderLoader.dll"));
         Add(Path.Combine(source, "Modding", "plugins", "ModdingAPI.dll"));
@@ -210,7 +216,8 @@ internal static class Program
             entryStream.CopyTo(memory); memory.Position = 0;
             using var client = AssemblyDefinition.ReadAssembly(memory);
             var expected = Version.Parse(version);
-            if (client.Name.Version.Major != expected.Major || client.Name.Version.Minor != expected.Minor || client.Name.Version.Build != expected.Build)
+            expected = new Version(expected.Major, expected.Minor, Math.Max(0, expected.Build), Math.Max(0, expected.Revision));
+            if (client.Name.Version != expected)
                 throw new InvalidDataException("Client assembly version differs from the manifest.");
         }
         using (var entryStream = zip.GetEntry("data/Blasphemous.Multiplayer.Common.dll")!.Open())

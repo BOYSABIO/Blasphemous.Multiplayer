@@ -10,7 +10,7 @@ using SimpleTCP;
 
 namespace Blasphemous.Multiplayer.Server;
 
-public class Server
+public partial class Server
 {
 	private struct SceneHostState
 	{
@@ -73,6 +73,7 @@ public class Server
 		_receiveBuffers.Clear();
 		_sceneHosts.Clear();
 		_sceneDeaths.Clear();
+		_bossScenes.Clear();
 		return true;
 	}
 
@@ -174,6 +175,10 @@ public class Server
 				break;
 			case NetworkType.PlayerExecutionAnim:
 				ReceivePlayerExecutionAnimRelay(e.ip, P_1);
+				break;
+			case NetworkType.BossEncounter:
+			case NetworkType.BossHazard:
+				ReceiveBossRelay(e.ip, P_1, P_0);
 				break;
 			default:
 				Logger.Error($"Data type '{P_0}' is not valid");
@@ -343,6 +348,7 @@ public class Server
 			RecalculateSceneHost(currentPlayer.room, sceneName);
 		}
 		RecalculateSceneHost(currentPlayer.room, currentPlayer.sceneName);
+		ReplayBossScene(currentPlayer.room, currentPlayer.sceneName, P_0);
 	}
 
 	private byte[] getScenePacket(PlayerInfo P_0)
@@ -509,7 +515,7 @@ public class Server
 			sendPlayerIntro(P_0, RefusalType.DuplicateIp);
 			return;
 		}
-		if (P_1[num++] != 16)
+		if (P_1[num++] != Blasphemous.Multiplayer.Common.Protocol.VERSION)
 		{
 			Logger.Warn("Player connection rejected: Protocol version doesn't match");
 			sendPlayerIntro(P_0, RefusalType.Protocol);
@@ -782,12 +788,18 @@ public class Server
 		{
 			_sceneHosts.Remove(text);
 			_sceneDeaths.Remove(text);
+			_bossScenes.Remove(text);
 			return;
 		}
 		SceneHostState sceneHostState;
 		string obj = (_sceneHosts.TryGetValue(text, out sceneHostState) ? sceneHostState.HostName : string.Empty);
 		SceneHostState sceneHostState2;
-		string text2 = ((!string.IsNullOrEmpty(_sessionEnemyHostName) && list.Contains(_sessionEnemyHostName)) ? _sessionEnemyHostName : ((!_sceneHosts.TryGetValue(text, out sceneHostState2) || !list.Contains(sceneHostState2.HostName)) ? list[0] : sceneHostState2.HostName));
+		// Preserve a living scene's incumbent. A returning preferred player has a
+		// freshly loaded world and must first receive the incumbent's state.
+		// Preference chooses the initial/replacement owner, not a preemption.
+		string text2 = (_sceneHosts.TryGetValue(text, out sceneHostState2) && list.Contains(sceneHostState2.HostName))
+			? sceneHostState2.HostName
+			: ((!string.IsNullOrEmpty(_sessionEnemyHostName) && list.Contains(_sessionEnemyHostName)) ? _sessionEnemyHostName : list[0]);
 		uint num = 1u;
 		if (_sceneHosts.TryGetValue(text, out var sceneHostState3))
 		{
@@ -800,6 +812,7 @@ public class Server
 			Term = num
 		};
 		BroadcastSceneEnemyHost(P_0, P_1, text2, num);
+		ReplayBossScene(P_0, P_1, null);
 		Logger.Info($"Scene enemy host {text} → '{text2}' term={num}");
 		if (num2)
 		{
@@ -950,6 +963,7 @@ public class Server
 			return;
 		}
 		byte[] namedPacket = GetNamedPacket(currentPlayer, P_1);
+		ReplayBossScene(currentPlayer.room, currentPlayer.sceneName, P_0);
 		foreach (KeyValuePair<string, PlayerInfo> connectedPlayer in connectedPlayers)
 		{
 			if (!(connectedPlayer.Value.name != sceneHostState.HostName) && currentPlayer.isInSameScene(connectedPlayer.Value))
@@ -1020,3 +1034,4 @@ public class Server
 		return list.ToArray();
 	}
 }
+

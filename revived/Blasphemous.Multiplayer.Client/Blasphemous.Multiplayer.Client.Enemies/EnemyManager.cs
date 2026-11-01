@@ -120,6 +120,8 @@ public class EnemyManager
 	public bool IsSceneHost => _isSceneHost;
 
 	public uint HostTerm => _hostTerm;
+	public bool AcceptBossAuthority(string sender, int sceneHash, uint term)
+		=> sceneHash == CurrentSceneHash() && term == _hostTerm && term != 0 && sender == _sceneHostName;
 
 	public bool AllowLocalExecution => _allowLocalExecution;
 
@@ -137,7 +139,9 @@ public class EnemyManager
 
 	public void LevelLoaded(string scene)
 	{
-		Clear();
+		// A native intro can begin before the mod's level-loaded callback. Keep
+		// its saved pristine state/intro request while resetting network state.
+		Clear(preserveCurrentWarden: true);
 		_currentScene = scene ?? string.Empty;
 		_levelAge = 0f;
 		_deferredScanIndex = 0;
@@ -162,6 +166,7 @@ public class EnemyManager
 
 	public void OnDisconnect()
 	{
+		WardenSyncAdapter.RestoreAll();
 		ReleaseAllOrphans();
 		foreach (SyncedEnemy item in UniqueEnemies())
 		{
@@ -198,7 +203,7 @@ public class EnemyManager
 			bool isSceneHost = _isSceneHost;
 			string sceneHostName = _sceneHostName;
 			_sceneHostName = hostName ?? string.Empty;
-			_hostTerm = hostTerm;
+			SetHostTerm(hostTerm);
 			string text = Main.Multiplayer.PlayerName ?? string.Empty;
 			_isSceneHost = !string.IsNullOrEmpty(_sceneHostName) && _sceneHostName == text;
 			if (_isSceneHost && !isSceneHost)
@@ -229,6 +234,7 @@ public class EnemyManager
 			return;
 		}
 		_levelAge += Time.deltaTime;
+		WardenNetwork.Tick();
 		if (_requestCooldown > 0f)
 		{
 			_requestCooldown -= Time.deltaTime;
@@ -674,6 +680,16 @@ public class EnemyManager
 		}
 		if (!alive || life <= 0.01f)
 		{
+			// A live boss may momentarily report zero health during scripted setup.
+			if (alive)
+			{
+				SyncedEnemy warden = BindRemoteEnemy(netId, enemyTypeId, position, generation, spawnKey);
+				if (warden != null && warden.IsWarden)
+				{
+					ApplyRemoteState(warden, position, life, true, facingRight, attacking, parryable, despawned, false, animHash, animTime, hostTime, spawnKey, generation, sequence, warden.LastSequence == 0);
+					return;
+				}
+			}
 			ApplyDeathToLocal(netId, position, enemyTypeId, generation, sequence, animHash, animTime, despawned, spawnKey);
 			return;
 		}
@@ -758,11 +774,13 @@ public class EnemyManager
 		}
 		if (value.Enemy.Dead || value.VisuallyDead)
 		{
+			if (value.IsWarden) { TryApplyWardenDeath(value); return; }
 			ForceVisualKill(value);
 			value.HardHideBody();
 			return;
 		}
 		ModLog.Info($"[EnemySync] Host applying replayed death {value.NetId} spawnKey={value.SpawnKey}");
+		if (value.IsWarden) { TryApplyWardenDeath(value); return; }
 		_applyingRemoteDamage = true;
 		try
 		{
@@ -804,6 +822,12 @@ public class EnemyManager
 		{
 			return true;
 		}
+		if (value.IsWarden && !TryApplyWardenDeath(value))
+		{
+			_pendingDeaths[netId] = new PendingDeath { SpawnKey = spawnKey, TypeId = enemyTypeId ?? string.Empty,
+				Position = deathPos, Generation = generation, Sequence = sequence };
+			return false;
+		}
 		ForceVisualKill(value);
 		if (animHash != 0)
 		{
@@ -832,12 +856,25 @@ public class EnemyManager
 		return true;
 	}
 
+	private bool TryApplyWardenDeath(SyncedEnemy synced)
+	{
+		bool previous = _applyingRemoteDamage;
+		_applyingRemoteDamage = true;
+		try
+		{
+			synced.ForceVisualDeath();
+			return !synced.IsValid || synced.Enemy.Dead;
+		}
+		finally { _applyingRemoteDamage = previous; }
+	}
+
 	private void ForceVisualKill(SyncedEnemy synced)
 	{
 		if (synced == null || !synced.IsValid)
 		{
 			return;
 		}
+		if (synced.IsWarden) { TryApplyWardenDeath(synced); return; }
 		try
 		{
 			synced.DestroyLocalExecutionPrompt();
@@ -894,6 +931,32 @@ public class EnemyManager
 		if (spawnKey != 0)
 		{
 			synced.SpawnKey = spawnKey;
+		}
+		if (synced.IsWarden)
+		{
+			WardenNetwork.NoteHostClock(hostTime);
+			if (sequence != 0 && synced.LastSequence != 0 && sequence < synced.LastSequence) return;
+			if (!alive)
+			{
+				ApplyDeathToLocal(synced.NetId, position, synced.EnemyTypeId, generation, sequence, animHash, animTime, false, spawnKey);
+				return;
+			}
+			if (synced.VisuallyDead || synced.Enemy.Dead) return;
+			synced.SetPuppet(true);
+			synced.PushRemotePose(hostTime, position, facingRight);
+			synced.ApplyWardenHealth(life);
+			synced.SetParryable(parryable);
+			synced.ApplyAnim(animHash, animTime, false, attacking);
+			synced.LastSentPosition = position;
+			synced.LastSentLife = life;
+			synced.LastSentAlive = true;
+			synced.LastSentFacingRight = facingRight;
+			synced.LastSentAttacking = attacking;
+			synced.LastSentExecutable = false;
+			synced.Executable = false;
+			synced.Generation = generation;
+			synced.LastSequence = sequence;
+			return;
 		}
 		if (synced.VisuallyDead)
 		{
@@ -1035,6 +1098,7 @@ public class EnemyManager
 		{
 			if (IsSyncableEnemy(enemy) && !enemy.Dead && !GetTrackedNetId(enemy).HasValue)
 			{
+				if (WardenSyncAdapter.Supports(enemy)) { WardenSyncAdapter.For(enemy).SetPuppet(true); continue; }
 				int instanceID = enemy.GetInstanceID();
 				if (!_orphans.ContainsKey(instanceID))
 				{
@@ -1885,6 +1949,7 @@ public class EnemyManager
 				continue;
 			}
 			EnemyPristineRegistry.CaptureIfNeeded(enemy);
+			if (WardenSyncAdapter.Supports(enemy)) { WardenSyncAdapter.For(enemy).SetPuppet(true); continue; }
 			EnemyBehaviour enemyBehaviour = enemy.EnemyBehaviour;
 			if (enemyBehaviour != null)
 			{
@@ -2110,6 +2175,13 @@ public class EnemyManager
 		return sceneHash == CurrentSceneHash();
 	}
 
+	private void SetHostTerm(uint hostTerm)
+	{
+		if (_hostTerm == hostTerm) return;
+		foreach (SyncedEnemy enemy in UniqueEnemies()) enemy.ResetAuthorityEpoch();
+		_hostTerm = hostTerm;
+	}
+
 	private bool AcceptAuthority(string senderName, int sceneHash, uint hostTerm, uint sequence)
 	{
 		if (!AcceptScene(sceneHash))
@@ -2127,7 +2199,7 @@ public class EnemyManager
 		}
 		if (hostTerm > _hostTerm)
 		{
-			_hostTerm = hostTerm;
+			SetHostTerm(hostTerm);
 		}
 		return true;
 	}
@@ -2272,8 +2344,11 @@ public class EnemyManager
 		return Mathf.Round(v * 2f) / 2f;
 	}
 
-	private void Clear()
+	private void Clear(bool preserveCurrentWarden = false)
 	{
+		WardenNetwork.Clear();
+		if (preserveCurrentWarden) WardenSyncAdapter.Prune();
+		else WardenSyncAdapter.Clear();
 		_enemies.Clear();
 		_tombstones.Clear();
 		_pendingDeaths.Clear();
@@ -2308,6 +2383,7 @@ public class EnemyManager
 		{
 			return false;
 		}
+		if (WardenSyncAdapter.Supports(enemy)) return true;
 		if (string.IsNullOrEmpty(enemy.Id))
 		{
 			return false;
